@@ -1,3 +1,16 @@
+### Precomputing contours
+
+The green value isolines are precomputed from the Sweden tidy table.
+
+- Source: `src/data/porozzo-tidy.csv`
+- Output: `src/data/porozzo-contours.json`
+- Script: `buildContours.ts`
+
+Rebuild after changing the data:
+
+```bash
+npm run build:contours
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.

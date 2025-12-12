@@ -9,6 +9,7 @@ import {
   projectSurface,
   projectIso,
   projectionForPreset,
+  buildSurfaceSilhouette2D,
   type ProjectionOptions,
   type ProjectionPreset,
 } from "../core/geometry";
@@ -17,8 +18,16 @@ import type { Point2D, Point3D } from "../core/types";
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 
+// NOTE: generated offline by `npm run build:contours` from porozzo-tidy.csv
+import contourRaw from "../data/porozzo-contours.json";
+
+type ContourPointFile = { year: number; age: number };
+type ContourFile = { level: number; points: ContourPointFile[] };
+
+const contourData = contourRaw as ContourFile[];
+
 const WIDTH = 800;
-const HEIGHT = 600;
+const HEIGHT = 500;
 const FLOOR_DEPTH = 0;
 
 type Quad2D = {
@@ -26,149 +35,58 @@ type Quad2D = {
   depth: number;
 };
 
-// parse tidy CSV once at module load
 const swedenRows = parseSwedenCsv(swedenCsv);
-
-// helpers for line thickness
-const yearStrokeWidth = (year: number): number =>
-  (year - 1750) % 25 === 0 ? 1 : 0.25;
-
-const ageStrokeWidth = (age: number): number =>
-  age === 0 || age % 25 === 0 ? 1 : 0.25;
-
-// thicker cohorts every 25 years of birth
-const cohortStrokeWidth = (birthYear: number, baseYear = 1750): number =>
-  (birthYear - baseYear) % 25 === 0 ? 1 : 0.25;
 
 export default function AppPlayground() {
   const [preset, setPreset] = useState<ProjectionPreset>("perozzoBasic");
 
-  // choose camera based on preset
+  // camera / projection based on preset
   const projection: ProjectionOptions = projectionForPreset(
     preset,
     WIDTH,
     HEIGHT
   );
 
-  // Sweden surface in core space
+  // Sweden surface in core space (includes age 0 as first row)
   const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight: 3 });
-  const surfacePoints: Point3D[] = swedenSurface.points; // ages >= 5
+  const surfacePoints: Point3D[] = swedenSurface.points;
   const rows = swedenSurface.rows;
   const cols = swedenSurface.cols;
   const years = swedenSurface.years;
   const ages = swedenSurface.ages;
 
-  // choose which birth cohorts to draw (every 5th year, then emphasize every 25)
-  const minYear = years[0];
-  const maxYear = years[years.length - 1];
+  // project main surface + floor
+  const projectedSurface: Point2D[] = projectSurface(surfacePoints, projection);
 
-  // estimate the full birth-year span covered by our surface
-  const minSurfaceAge = ages[0];                 // e.g. 5
-  const maxSurfaceAge = ages[ages.length - 1];   // e.g. 85 or 90
+  // silhouette polygon for clipping green value lines
+  const silhouettePts = buildSurfaceSilhouette2D(projectedSurface, rows, cols);
+  const silhouettePoints = silhouettePts.map((p) => `${p.x},${p.y}`).join(" ");
 
-  const minBirthYear = minYear - maxSurfaceAge;  // earliest cohorts still alive
-  const maxBirthYear = maxYear;                  // youngest cohorts at age 0
-
-  // build cohort birth years across the whole range (every 5 years)
-  const cohortBirthYears: number[] = [];
-  for (let b = minBirthYear; b <= maxBirthYear; b += 5) {
-    cohortBirthYears.push(b);
-  }
-
-  const birthPoints3D: Point3D[] = swedenSurface.births; // age 0 ridge
-
-  // project surface + floor + births
-  const projectedSurface: Point2D[] = projectSurface(
-    surfacePoints,
-    projection
-  );
   const floorPoints: Point2D[] = floorPolygon(
     rows,
     cols,
     FLOOR_DEPTH,
     projection
   );
-  const projectedBirths: Point2D[] = birthPoints3D.map((p) =>
-    projectIso(p, projection)
-  );
 
-  // --- helper: build polyline points for a given year column (red lines) ---
-  const yearColumnPoints = (colIndex: number): string => {
-    const pts: Point2D[] = [];
-
-    // births point at this year
-    const birth = projectedBirths[colIndex];
-    pts.push(birth);
-
-    // surface points from age 5 band downwards
-    for (let row = 0; row < rows; row++) {
-      const p = projectedSurface[row * cols + colIndex];
-      pts.push(p);
-    }
-
-    return pts.map((p) => `${p.x},${p.y}`).join(" ");
-  };
-
-  // --- helper: build polyline points for a given age row (black lines) ---
-  const ageRowPoints = (rowIndex: number): string => {
-    const pts: Point2D[] = [];
-
+  // births ridge from age 0 row (if present)
+  const birthRowIndex = ages.indexOf(0);
+  const projectedBirthRow: Point2D[] = [];
+  if (birthRowIndex >= 0) {
     for (let col = 0; col < cols; col++) {
-      const p = projectedSurface[rowIndex * cols + col];
-      pts.push(p);
+      projectedBirthRow.push(projectedSurface[birthRowIndex * cols + col]);
     }
+  }
 
-    return pts.map((p) => `${p.x},${p.y}`).join(" ");
-  };
-
-  // --- helper: build polyline points for one cohort (blue lines) ---
-  // birthYear B: follow points where birthYear = year - age ≈ B
-  const cohortPoints = (birthYear: number): string => {
-    const pts: Point2D[] = [];
-
-    const minSurfaceAge = 5;         // first age band on the sheet
-    const ageStep = 5;               // 5-year bands
-    const maxSurfaceAge = minSurfaceAge + (rows - 1) * ageStep;
-
-    for (let col = 0; col < cols; col++) {
-      const year = years[col];
-      const age = year - birthYear;
-
-      // before this cohort is born
-      if (age < 0) continue;
-
-      // at birth: use the births ridge point
-      if (age === 0) {
-        const birthPt = projectedBirths[col];
-        pts.push(birthPt);
-        continue;
-      }
-
-      // beyond our age table -> stop following this cohort
-      if (age > maxSurfaceAge) break;
-
-      // map age to nearest age band row index in the surface grid
-      const rowIndex = Math.round((age - minSurfaceAge) / ageStep);
-      if (rowIndex < 0 || rowIndex >= rows) continue;
-
-      const p = projectedSurface[rowIndex * cols + col];
-      pts.push(p);
-    }
-
-    return pts.map((p) => `${p.x},${p.y}`).join(" ");
-  };
-
-  // --- auto-centering of the projected scene (X and Y) ---
+  // --- auto-centering in SVG viewport ---
 
   const allX = [
     ...projectedSurface.map((p) => p.x),
     ...floorPoints.map((p) => p.x),
-    ...projectedBirths.map((p) => p.x),
   ];
   const allY = [
     ...projectedSurface.map((p) => p.y),
     ...floorPoints.map((p) => p.y),
-    ...projectedBirths.map((p) => p.y),
   ];
 
   const minX = Math.min(...allX);
@@ -180,18 +98,18 @@ export default function AppPlayground() {
   const currentCenterY = (minY + maxY) / 2;
 
   const targetCenterX = WIDTH / 2;
-  const targetCenterY = HEIGHT * 0.5; // tweak vertical anchoring
+  const targetCenterY = HEIGHT * 0.5; // tweak to taste
 
   const offsetX = targetCenterX - currentCenterX;
   const offsetY = targetCenterY - currentCenterY;
 
-  // --- build quads + depth sort (white surface + birth lip) ---
+  // --- quads + depth sorting ---
 
+  // simple depth metric: larger = nearer to viewer
   const pointDepth = (p: Point3D) => p.x + p.y + p.z;
 
-  const surfaceQuads: Quad2D[] = [];
+  const quads: Quad2D[] = [];
 
-  // main sheet quads (ages >= 5)
   for (let y = 0; y < rows - 1; y++) {
     for (let x = 0; x < cols - 1; x++) {
       const idx00 = y * cols + x;
@@ -213,50 +131,123 @@ export default function AppPlayground() {
         corners3D.reduce((sum, p) => sum + pointDepth(p), 0) /
         corners3D.length;
 
-      surfaceQuads.push({ points2D: corners2D, depth });
+      quads.push({
+        points2D: corners2D,
+        depth,
+      });
     }
   }
 
-  // vertical quads connecting births (age 0) down to the first age band (age 5)
-  const birthQuads: Quad2D[] = [];
-  const firstRowOffset = 0; // ageIndex 0 → first age-band row in surfacePoints
+  // painter's algorithm: draw far → near
+  quads.sort((a, b) => a.depth - b.depth);
 
-  for (let x = 0; x < cols - 1; x++) {
-    const b0 = birthPoints3D[x];
-    const b1 = birthPoints3D[x + 1];
+  // --- isolines: red (years), black (ages), blue (cohorts) ---
 
-    const s0 = surfacePoints[firstRowOffset + x];
-    const s1 = surfacePoints[firstRowOffset + x + 1];
+  // RED: year lines (each column), heavy every 25 years
+  const yearLines = years.map((year, colIndex) => {
+    const pts: Point2D[] = [];
+    for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+    const heavy = (year - years[0]) % 25 === 0;
+    return { year, points: pts, heavy };
+  });
 
-    const corners3D: Point3D[] = [b0, b1, s1, s0];
-    const corners2D: Point2D[] = corners3D.map((p) =>
-      projectIso(p, projection)
-    );
+  // BLACK: age lines (each row), heavy every 25 years of age
+  const ageLines = ages.map((age, rowIndex) => {
+    const pts: Point2D[] = [];
+    for (let colIndex = 0; colIndex < cols; colIndex++) {
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+    const heavy = age % 25 === 0;
+    return { age, points: pts, heavy };
+  });
 
-    const depth =
-      corners3D.reduce((sum, p) => sum + pointDepth(p), 0) /
-      corners3D.length;
+  // BLUE: cohort lines (birth-year diagonals), based on the 5-year age grid
+  type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
+  const cohortLines: CohortLine[] = [];
 
-    birthQuads.push({ points2D: corners2D, depth });
+  const minYear = years[0];
+  const maxYear = years[years.length - 1];
+  const maxAge = ages[ages.length - 1];
+
+  for (let birthYear = minYear; birthYear <= maxYear; birthYear += 5) {
+    const pts: Point2D[] = [];
+
+    for (const year of years) {
+      const age = year - birthYear;
+      if (age < 0 || age > maxAge) continue;
+      if (age % 5 !== 0) continue; // snap to 5-year age grid
+
+      const rowIndex = ages.indexOf(age);
+      const colIndex = years.indexOf(year);
+      if (rowIndex === -1 || colIndex === -1) continue;
+
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+
+    if (pts.length > 1) {
+      const heavy = (birthYear - minYear) % 25 === 0;
+      cohortLines.push({ birthYear, points: pts, heavy });
+    }
   }
 
-  const allQuads = [...surfaceQuads, ...birthQuads];
-  allQuads.sort((a, b) => a.depth - b.depth);
+  // --- GREEN: value isolines (precomputed in data space, then interpolated on surface) ---
 
-  // --- render ---
+  const yearToColIndex = new Map<number, number>();
+  years.forEach((y, i) => yearToColIndex.set(y, i));
+
+  function findRowBelow(age: number): number {
+    if (age < ages[0] || age > ages[ages.length - 1]) return -1;
+    for (let i = 0; i < ages.length - 1; i++) {
+      if (age >= ages[i] && age <= ages[i + 1]) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  const contourPolylines2D = contourData.map((iso) => {
+    const pts: Point2D[] = [];
+
+    for (const pt of iso.points) {
+      const col = yearToColIndex.get(pt.year);
+      if (col == null) continue;
+
+      const rowBelow = findRowBelow(pt.age);
+      if (rowBelow < 0 || rowBelow >= rows - 1) continue;
+
+      const age0 = ages[rowBelow];
+      const age1 = ages[rowBelow + 1];
+      const t = (pt.age - age0) / (age1 - age0);
+
+      const p0 = projectedSurface[rowBelow * cols + col];
+      const p1 = projectedSurface[(rowBelow + 1) * cols + col];
+
+      const x = p0.x + t * (p1.x - p0.x);
+      const y = p0.y + t * (p1.y - p0.y);
+
+      pts.push({ x, y });
+    }
+
+    return {
+      level: iso.level,
+      points: pts,
+    };
+  });
 
   return (
     <div
       style={{
         padding: "1rem",
-        background: "gray",
+        background: "#111",
         color: "#eee",
         minHeight: "100vh",
         boxSizing: "border-box",
       }}
     >
       <h1>Perozzo Playground</h1>
-      <p>Fifth test: add simple lines.</p>
+      <p>Sweden survivorship surface with Perozzo-style meshes.</p>
 
       <div style={{ marginBottom: "0.75rem" }}>
         <label>
@@ -275,72 +266,90 @@ export default function AppPlayground() {
       <svg
         width={WIDTH}
         height={HEIGHT}
-        style={{ border: "1px solid #555", background: "gray" }}
+        style={{ border: "1px solid #555", background: "#181818" }}
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
+          {/*Green value isolines are clipped to the visible surface silhouette
+          so they don't "bridge" above the ridge line.*/}
+          <defs>
+            <clipPath id="greenClip">
+              {/* NOTE: curly braces here */}
+              <polygon points={silhouettePoints} />
+            </clipPath>
+          </defs>
           {/* base plane */}
           <polygon
             points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="#292929"
+            fill="#292929ff"
             stroke="none"
           />
 
-          {/* white surface quads (depth sorted) */}
-          {allQuads.map((quad, i) => (
+          {/* main surface quads */}
+          {quads.map((quad, i) => (
             <polygon
               key={i}
               points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="ivory"
-              stroke="none"
+              fill="#ffffff"
+              stroke="#444"
               strokeWidth={0.6}
             />
           ))}
 
-          {/* RED: census-year lines (one per year col; thicker every 25 years) */}
-          {years.map((year, colIndex) => (
+          {/* RED: year isolines */}
+          {yearLines.map((line) => (
             <polyline
-              key={`year-line-${year}`}
-              points={yearColumnPoints(colIndex)}
+              key={`year-${line.year}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
               fill="none"
-              stroke="firebrick"
-              strokeWidth={yearStrokeWidth(year)}
+              stroke="#c0392b"
+              strokeWidth={line.heavy ? 1.3 : 0.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
           ))}
 
-          {/* BLACK: age lines across years (ages 5,10,…; thicker every 25 years) */}
-          {Array.from({ length: rows }, (_, rowIndex) => {
-            const age = 5 + rowIndex * 5; // age bands on the surface
-            return (
+          {/* BLUE: cohort lines */}
+          {cohortLines.map((line) => (
+            <polyline
+              key={`cohort-${line.birthYear}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke="#2980b9"
+              strokeWidth={line.heavy ? 1.2 : 0.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ))}
+
+          {/* GREEN value isolines, clipped to the sheet */}
+          <g clipPath="url(#greenClip)">
+            {contourPolylines2D.map((iso, i) => (
               <polyline
-                key={`age-line-${age}`}
-                points={ageRowPoints(rowIndex)}
+                key={`val-${iso.level}-${i}`}
+                points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
                 fill="none"
-                stroke="dimgray"
-                strokeWidth={ageStrokeWidth(age)}
+                stroke="#2ecc71"
+                strokeWidth={iso.level % 50000 === 0 ? 1.2 : 0.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
               />
-            );
-          })}
+            ))}
+          </g>
 
-          {/* BLUE: cohort lines (birth cohorts), follow year - age ≈ birthYear */}
-          {cohortBirthYears.map((birthYear) => (
+          {/* BLACK: age isolines */}
+          {ageLines.map((line) => (
             <polyline
-              key={`cohort-${birthYear}`}
-              points={cohortPoints(birthYear)}
+              key={`age-${line.age}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
               fill="none"
-              stroke="steelblue"
-              strokeWidth={cohortStrokeWidth(birthYear, 1700)}
+              stroke="#000000"
+              strokeWidth={line.heavy ? 1.3 : 0.5}
+              strokeLinecap="round"
+              strokeLinejoin="round"
             />
           ))}
 
-          {/* BLACK: births ridge (age 0), co-located above age 5 */}
-          <polyline
-            points={projectedBirths.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke="#000"
-            strokeWidth={ageStrokeWidth(0)}
-          />
-
-          {/* invisible points – reserved for future interaction */}
+          {/* optional: invisible grid points for debugging */}
           {projectedSurface.map((p, i) => (
             <circle
               key={i}

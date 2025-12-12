@@ -4,16 +4,18 @@ export type SwedenRow = {
   year: number;
   age: number;
   survivors: number;
-  ageIndex: number;   // NEW
+  ageIndex: number; // 0, 1, 2, ... for 0,5,10,...
 };
 
 export type SwedenSurfaceGrid = {
-  points: Point3D[];     // grid for ages >= 5
-  rows: number;          // number of age rows (5,10,...,100)
-  cols: number;          // number of year columns
-  ages: number[];        // age bands used in the surface (no 0)
+  points: Point3D[];   // full grid, including age 0 row
+  rows: number;        // number of age rows (0,5,10,...,100)
+  cols: number;        // number of year columns
+  ages: number[];      // age bands used in the surface (includes 0)
   years: number[];
-  births: Point3D[];     // separate ridge for age 0
+  births: Point3D[];   // convenience: row for age 0
+  maxSurvivors: number;
+  zScale: number;
 };
 
 /**
@@ -43,9 +45,8 @@ export function parseSwedenCsv(csvText: string): SwedenRow[] {
       continue;
     }
 
-    // ageIndex: 0 & 5 share 0, then every 5-year step increments
-    const ageIndex =
-      age === 0 || age === 5 ? 0 : age / 5 - 1;
+    // simple 5-year index: 0,1,2,... for 0,5,10,...
+    const ageIndex = age / 5;
 
     rows.push({ year, age, survivors, ageIndex });
   }
@@ -56,13 +57,27 @@ export function parseSwedenCsv(csvText: string): SwedenRow[] {
 /**
  * Map the Sweden survivor table into a regular grid of Point3D.
  *
- * x = year index, y = age index (starting at age = 5), z = scaled survivor count.
- * Age 0 is handled separately as a "births" ridge that sits directly above age 5.
+ * x = year index
+ * y = age index (0 for age 0, 1 for age 5, ...)
+ * z = scaled survivor count
  */
 export function makeSwedenSurface(
   data: SwedenRow[],
   opts?: { zScale?: number; maxHeight?: number }
 ): SwedenSurfaceGrid {
+  if (data.length === 0) {
+    return {
+      points: [],
+      rows: 0,
+      cols: 0,
+      ages: [],
+      years: [],
+      births: [],
+      maxSurvivors: 0,
+      zScale: 0,
+    };
+  }
+
   const survivorsValues = data.map((d) => d.survivors);
   const maxSurvivors = Math.max(...survivorsValues);
 
@@ -78,11 +93,10 @@ export function makeSwedenSurface(
   const years = Array.from(new Set(data.map((d) => d.year))).sort(
     (a, b) => a - b
   );
-  const allAges = Array.from(new Set(data.map((d) => d.age))).sort(
+  const ages = Array.from(new Set(data.map((d) => d.age))).sort(
     (a, b) => a - b
-  );
+  ); // includes 0
 
-  const ages = allAges.filter((a) => a !== 0); // drop age 0 from surface grid
   const cols = years.length;
   const rowsCount = ages.length;
 
@@ -95,7 +109,7 @@ export function makeSwedenSurface(
 
   const points: Point3D[] = [];
 
-  // row-major order: y = age index, x = year index (ages >= 5)
+  // row-major order: y = age index (0 for age 0)
   for (let rowIndex = 0; rowIndex < rowsCount; rowIndex++) {
     const age = ages[rowIndex];
 
@@ -104,27 +118,21 @@ export function makeSwedenSurface(
       const survivors = map.get(key(year, age)) ?? 0;
 
       const x = colIndex;
-      const y = rowIndex;      // age 5 → y=0
+      const y = rowIndex; // 0 → age 0, 1 → age 5, etc.
       const z = survivors * zScale;
 
       points.push({ x, y, z });
     }
   }
 
-  // births ridge: age 0, but placed at the same y index as age 5 (y = 0)
+  // births ridge = row for age 0 (first row)
   const births: Point3D[] = [];
-  const birthAge = 0;
-  const yIndexForBirths = 0; // directly above the first age band (5)
+  const birthRowIndex = ages.indexOf(0);
 
-  for (let colIndex = 0; colIndex < cols; colIndex++) {
-    const year = years[colIndex];
-    const survivorsBirth = map.get(key(year, birthAge)) ?? 0;
-
-    const x = colIndex;
-    const y = yIndexForBirths;
-    const z = survivorsBirth * zScale;
-
-    births.push({ x, y, z });
+  if (birthRowIndex >= 0) {
+    for (let colIndex = 0; colIndex < cols; colIndex++) {
+      births.push(points[birthRowIndex * cols + colIndex]);
+    }
   }
 
   return {
@@ -134,5 +142,7 @@ export function makeSwedenSurface(
     ages,
     years,
     births,
+    maxSurvivors,
+    zScale,
   };
 }

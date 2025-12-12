@@ -173,3 +173,42 @@ export function floorPolygon(
 
   return floorCorners3D.map((p) => projectIso(p, options));
 }
+
+//builds silhouette of surface grid for clipping
+export function buildSurfaceSilhouette2D(
+  projectedSurface: Point2D[],
+  rows: number,
+  cols: number
+): Point2D[] {
+  // bottom row: y = 0, left → right
+  const bottom: Point2D[] = [];
+  for (let c = 0; c < cols; c++) {
+    bottom.push(projectedSurface[0 * cols + c]);
+  }
+
+  // right edge: bottom → top
+  const right: Point2D[] = [];
+  for (let r = 0; r < rows; r++) {
+    right.push(projectedSurface[r * cols + (cols - 1)]);
+  }
+
+  // top row: max age, right → left
+  const top: Point2D[] = [];
+  for (let c = cols - 1; c >= 0; c--) {
+    top.push(projectedSurface[(rows - 1) * cols + c]);
+  }
+
+  // left edge: top → bottom
+  const left: Point2D[] = [];
+  for (let r = rows - 1; r >= 0; r--) {
+    left.push(projectedSurface[r * cols + 0]);
+  }
+
+  // stitch, skipping obvious duplicates
+  return [
+    ...bottom,
+    ...right.slice(1),
+    ...top.slice(1),
+    ...left.slice(1, -1),
+  ];
+}
