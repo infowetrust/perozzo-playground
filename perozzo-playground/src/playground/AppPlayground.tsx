@@ -30,6 +30,58 @@ const WIDTH = 800;
 const HEIGHT = 500;
 const FLOOR_DEPTH = 0;
 
+// Centralized visual style for the playground.
+// If you want to art-direct the plate, tweak values here.
+const vizStyle = {
+  page: {
+    background: "#111",
+    text: "#eee",
+  },
+  svg: {
+    border: "#555",
+    background: "#181818",
+  },
+  floor: {
+    fill: "#292929ff",
+    stroke: "none" as "none",
+  },
+  surface: {
+    fill: "ivory",
+    stroke: "none",
+    strokeWidth: 0.6,
+  },
+  years: {
+    stroke: "#c0392b",
+    thinWidth: 0.5,
+    thickWidth: 1,
+    heavyStep: 25, // emphasize every ## years
+
+  },
+  ages: {
+    stroke: "gray",
+    thinWidth: 0.5,
+    thickWidth: 1,
+    heavyStep: 25, // emphasize every ## years
+  },
+  cohorts: {
+    stroke: "#2980b9",
+    thinWidth: 0.5,
+    thickWidth: 1,
+    heavyStep: 25, // emphasize every ## years
+  },
+  values: {
+    stroke: "#2ecc71",
+    thinWidth: 0.5,
+    thickWidth: 1,
+    heavyStep: 50_000,
+  },
+  debugPoints: {
+    fill: "#ffcc66",
+    opacity: 0,
+    radius: 2,
+  },
+};
+
 type Quad2D = {
   points2D: Point2D[];
   depth: number;
@@ -149,7 +201,8 @@ export default function AppPlayground() {
     for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
       pts.push(projectedSurface[rowIndex * cols + colIndex]);
     }
-    const heavy = (year - years[0]) % 25 === 0;
+    const heavy =
+      (year - years[0]) % vizStyle.years.heavyStep === 0;
     return { year, points: pts, heavy };
   });
 
@@ -159,19 +212,26 @@ export default function AppPlayground() {
     for (let colIndex = 0; colIndex < cols; colIndex++) {
       pts.push(projectedSurface[rowIndex * cols + colIndex]);
     }
-    const heavy = age % 25 === 0;
+    const heavy =
+      (age - ages[0]) % vizStyle.ages.heavyStep === 0;
     return { age, points: pts, heavy };
   });
+
+  // Cohort birth years: derive from the table itself.
+  // For every (year, age) pair we know birthYear = year - age.
+  // This guarantees we include cohorts born *before* the first table year.
+  const cohortBirthYears = Array.from(
+    new Set(swedenRows.map((row) => row.year - row.age))
+  ).sort((a, b) => a - b);
 
   // BLUE: cohort lines (birth-year diagonals), based on the 5-year age grid
   type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
   const cohortLines: CohortLine[] = [];
 
   const minYear = years[0];
-  const maxYear = years[years.length - 1];
   const maxAge = ages[ages.length - 1];
 
-  for (let birthYear = minYear; birthYear <= maxYear; birthYear += 5) {
+  for (const birthYear of cohortBirthYears) {
     const pts: Point2D[] = [];
 
     for (const year of years) {
@@ -187,7 +247,8 @@ export default function AppPlayground() {
     }
 
     if (pts.length > 1) {
-      const heavy = (birthYear - minYear) % 25 === 0;
+      const heavy =
+        (birthYear - minYear) % vizStyle.cohorts.heavyStep === 0;
       cohortLines.push({ birthYear, points: pts, heavy });
     }
   }
@@ -240,8 +301,8 @@ export default function AppPlayground() {
     <div
       style={{
         padding: "1rem",
-        background: "#111",
-        color: "#eee",
+        background: vizStyle.page.background,
+        color: vizStyle.page.text,
         minHeight: "100vh",
         boxSizing: "border-box",
       }}
@@ -266,7 +327,10 @@ export default function AppPlayground() {
       <svg
         width={WIDTH}
         height={HEIGHT}
-        style={{ border: "1px solid #555", background: "#181818" }}
+        style={{
+          border: `1px solid ${vizStyle.svg.border}`,
+          background: vizStyle.svg.background,
+        }}
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
           {/*Green value isolines are clipped to the visible surface silhouette
@@ -280,8 +344,8 @@ export default function AppPlayground() {
           {/* base plane */}
           <polygon
             points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="#292929ff"
-            stroke="none"
+            fill={vizStyle.floor.fill}
+            stroke={vizStyle.floor.stroke}
           />
 
           {/* main surface quads */}
@@ -289,9 +353,9 @@ export default function AppPlayground() {
             <polygon
               key={i}
               points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="#ffffff"
-              stroke="#444"
-              strokeWidth={0.6}
+              fill={vizStyle.surface.fill}
+              stroke={vizStyle.surface.stroke}
+              strokeWidth={vizStyle.surface.strokeWidth}
             />
           ))}
 
@@ -301,8 +365,12 @@ export default function AppPlayground() {
               key={`year-${line.year}`}
               points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
               fill="none"
-              stroke="#c0392b"
-              strokeWidth={line.heavy ? 1.3 : 0.5}
+              stroke={vizStyle.years.stroke}
+              strokeWidth={
+                line.heavy
+                  ? vizStyle.years.thickWidth
+                  : vizStyle.years.thinWidth
+              }
               strokeLinecap="round"
               strokeLinejoin="round"
             />
@@ -314,8 +382,12 @@ export default function AppPlayground() {
               key={`cohort-${line.birthYear}`}
               points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
               fill="none"
-              stroke="#2980b9"
-              strokeWidth={line.heavy ? 1.2 : 0.5}
+              stroke={vizStyle.cohorts.stroke}
+              strokeWidth={
+                line.heavy
+                  ? vizStyle.cohorts.thickWidth
+                  : vizStyle.cohorts.thinWidth
+              }
               strokeLinecap="round"
               strokeLinejoin="round"
             />
@@ -328,8 +400,12 @@ export default function AppPlayground() {
                 key={`val-${iso.level}-${i}`}
                 points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
                 fill="none"
-                stroke="#2ecc71"
-                strokeWidth={iso.level % 50000 === 0 ? 1.2 : 0.5}
+                stroke={vizStyle.values.stroke}
+                strokeWidth={
+                  iso.level % vizStyle.values.heavyStep === 0
+                    ? vizStyle.values.thickWidth
+                    : vizStyle.values.thinWidth
+                }
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
@@ -342,8 +418,12 @@ export default function AppPlayground() {
               key={`age-${line.age}`}
               points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
               fill="none"
-              stroke="#000000"
-              strokeWidth={line.heavy ? 1.3 : 0.5}
+              stroke={vizStyle.ages.stroke}
+              strokeWidth={
+                line.heavy
+                  ? vizStyle.ages.thickWidth
+                  : vizStyle.ages.thinWidth
+              }
               strokeLinecap="round"
               strokeLinejoin="round"
             />
@@ -355,9 +435,9 @@ export default function AppPlayground() {
               key={i}
               cx={p.x}
               cy={p.y}
-              r={2}
-              fill="#ffcc66"
-              opacity={0}
+              r={vizStyle.debugPoints.radius}
+              fill={vizStyle.debugPoints.fill}
+              opacity={vizStyle.debugPoints.opacity}
             />
           ))}
         </g>
