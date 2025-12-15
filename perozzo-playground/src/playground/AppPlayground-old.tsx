@@ -55,6 +55,7 @@ const vizStyle = {
     thinWidth: 0.5,
     thickWidth: 1,
     heavyStep: 25, // emphasize every ## years
+
   },
   ages: {
     stroke: "gray",
@@ -86,218 +87,7 @@ type Quad2D = {
   depth: number;
 };
 
-type YearLine = { year: number; points: Point2D[]; heavy: boolean };
-type AgeLine = { age: number; points: Point2D[]; heavy: boolean };
-type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
-type ValueContour2D = { level: number; points: Point2D[] };
-
 const swedenRows = parseSwedenCsv(swedenCsv);
-
-/* ---------- GEOMETRY / LAYER HELPERS (Axis 2 refactor) ---------- */
-
-// simple depth metric: larger = nearer to viewer
-function pointDepth3D(p: Point3D): number {
-  return p.x + p.y + p.z;
-}
-
-function buildQuads(
-  surfacePoints: Point3D[],
-  rows: number,
-  cols: number,
-  projection: ProjectionOptions
-): Quad2D[] {
-  const quads: Quad2D[] = [];
-
-  for (let y = 0; y < rows - 1; y++) {
-    for (let x = 0; x < cols - 1; x++) {
-      const idx00 = y * cols + x;
-      const idx10 = y * cols + (x + 1);
-      const idx11 = (y + 1) * cols + (x + 1);
-      const idx01 = (y + 1) * cols + x;
-
-      const p00 = surfacePoints[idx00];
-      const p10 = surfacePoints[idx10];
-      const p11 = surfacePoints[idx11];
-      const p01 = surfacePoints[idx01];
-
-      const corners3D: Point3D[] = [p00, p10, p11, p01];
-      const corners2D: Point2D[] = corners3D.map((p) =>
-        projectIso(p, projection)
-      );
-
-      const depth =
-        corners3D.reduce((sum, p) => sum + pointDepth3D(p), 0) /
-        corners3D.length;
-
-      quads.push({
-        points2D: corners2D,
-        depth,
-      });
-    }
-  }
-
-  // painter's algorithm: draw far → near
-  quads.sort((a, b) => a.depth - b.depth);
-  return quads;
-}
-
-function buildYearLines(
-  projectedSurface: Point2D[],
-  years: number[],
-  rows: number,
-  cols: number
-): YearLine[] {
-  return years.map((year, colIndex) => {
-    const pts: Point2D[] = [];
-    for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
-    }
-    const heavy = (year - years[0]) % vizStyle.years.heavyStep === 0;
-    return { year, points: pts, heavy };
-  });
-}
-
-function buildAgeLines(
-  projectedSurface: Point2D[],
-  ages: number[],
-  rows: number,
-  cols: number
-): AgeLine[] {
-  return ages.map((age, rowIndex) => {
-    const pts: Point2D[] = [];
-    for (let colIndex = 0; colIndex < cols; colIndex++) {
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
-    }
-    const heavy = (age - ages[0]) % vizStyle.ages.heavyStep === 0;
-    return { age, points: pts, heavy };
-  });
-}
-
-function buildCohortLines(
-  swedenRowsLocal: typeof swedenRows,
-  projectedSurface: Point2D[],
-  years: number[],
-  ages: number[],
-  rows: number,
-  cols: number
-): CohortLine[] {
-  const cohortBirthYears = Array.from(
-    new Set(swedenRowsLocal.map((row) => row.year - row.age))
-  ).sort((a, b) => a - b);
-
-  const cohortLines: CohortLine[] = [];
-  const minYear = years[0];
-  const maxAge = ages[ages.length - 1];
-
-  for (const birthYear of cohortBirthYears) {
-    const pts: Point2D[] = [];
-
-    for (const year of years) {
-      const age = year - birthYear;
-      if (age < 0 || age > maxAge) continue;
-      if (age % 5 !== 0) continue; // snap to 5-year age grid
-
-      const rowIndex = ages.indexOf(age);
-      const colIndex = years.indexOf(year);
-      if (rowIndex === -1 || colIndex === -1) continue;
-
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
-    }
-
-    if (pts.length > 1) {
-      const heavy =
-        (birthYear - minYear) % vizStyle.cohorts.heavyStep === 0;
-      cohortLines.push({ birthYear, points: pts, heavy });
-    }
-  }
-
-  return cohortLines;
-}
-
-function buildValueContours2D(
-  contours: ContourFile[],
-  projectedSurface: Point2D[],
-  ages: number[],
-  years: number[],
-  rows: number,
-  cols: number
-): ValueContour2D[] {
-  const yearToColIndex = new Map<number, number>();
-  years.forEach((y, i) => yearToColIndex.set(y, i));
-
-  function findRowBelow(age: number): number {
-    if (age < ages[0] || age > ages[ages.length - 1]) return -1;
-    for (let i = 0; i < ages.length - 1; i++) {
-      if (age >= ages[i] && age <= ages[i + 1]) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  return contours.map((iso) => {
-    const pts: Point2D[] = [];
-
-    for (const pt of iso.points) {
-      const col = yearToColIndex.get(pt.year);
-      if (col == null) continue;
-
-      const rowBelow = findRowBelow(pt.age);
-      if (rowBelow < 0 || rowBelow >= rows - 1) continue;
-
-      const age0 = ages[rowBelow];
-      const age1 = ages[rowBelow + 1];
-      const t = (pt.age - age0) / (age1 - age0);
-
-      const p0 = projectedSurface[rowBelow * cols + col];
-      const p1 = projectedSurface[(rowBelow + 1) * cols + col];
-
-      const x = p0.x + t * (p1.x - p0.x);
-      const y = p0.y + t * (p1.y - p0.y);
-
-      pts.push({ x, y });
-    }
-
-    return {
-      level: iso.level,
-      points: pts,
-    };
-  });
-}
-
-function computeAutoCenterOffset(
-  projectedSurface: Point2D[],
-  floorPoints: Point2D[],
-  width: number,
-  height: number
-): { offsetX: number; offsetY: number } {
-  const allX = [
-    ...projectedSurface.map((p) => p.x),
-    ...floorPoints.map((p) => p.x),
-  ];
-  const allY = [
-    ...projectedSurface.map((p) => p.y),
-    ...floorPoints.map((p) => p.y),
-  ];
-
-  const minX = Math.min(...allX);
-  const maxX = Math.max(...allX);
-  const minY = Math.min(...allY);
-  const maxY = Math.max(...allY);
-
-  const currentCenterX = (minX + maxX) / 2;
-  const currentCenterY = (minY + maxY) / 2;
-
-  const targetCenterX = width / 2;
-  const targetCenterY = height * 0.5; // tweak to taste
-
-  const offsetX = targetCenterX - currentCenterX;
-  const offsetY = targetCenterY - currentCenterY;
-
-  return { offsetX, offsetY };
-}
-
-/* --------------------------- MAIN COMPONENT --------------------------- */
 
 export default function AppPlayground() {
   const [preset, setPreset] = useState<ProjectionPreset>("perozzoBasic");
@@ -331,36 +121,181 @@ export default function AppPlayground() {
     projection
   );
 
-  // auto-centering offsets
-  const { offsetX, offsetY } = computeAutoCenterOffset(
-    projectedSurface,
-    floorPoints,
-    WIDTH,
-    HEIGHT
-  );
+  // births ridge from age 0 row (if present)
+  const birthRowIndex = ages.indexOf(0);
+  const projectedBirthRow: Point2D[] = [];
+  if (birthRowIndex >= 0) {
+    for (let col = 0; col < cols; col++) {
+      projectedBirthRow.push(projectedSurface[birthRowIndex * cols + col]);
+    }
+  }
 
-  // surface mesh quads
-  const quads = buildQuads(surfacePoints, rows, cols, projection);
+  // --- auto-centering in SVG viewport ---
 
-  // isoline layers
-  const yearLines = buildYearLines(projectedSurface, years, rows, cols);
-  const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
-  const cohortLines = buildCohortLines(
-    swedenRows,
-    projectedSurface,
-    years,
-    ages,
-    rows,
-    cols
-  );
-  const contourPolylines2D = buildValueContours2D(
-    contourData,
-    projectedSurface,
-    ages,
-    years,
-    rows,
-    cols
-  );
+  const allX = [
+    ...projectedSurface.map((p) => p.x),
+    ...floorPoints.map((p) => p.x),
+  ];
+  const allY = [
+    ...projectedSurface.map((p) => p.y),
+    ...floorPoints.map((p) => p.y),
+  ];
+
+  const minX = Math.min(...allX);
+  const maxX = Math.max(...allX);
+  const minY = Math.min(...allY);
+  const maxY = Math.max(...allY);
+
+  const currentCenterX = (minX + maxX) / 2;
+  const currentCenterY = (minY + maxY) / 2;
+
+  const targetCenterX = WIDTH / 2;
+  const targetCenterY = HEIGHT * 0.5; // tweak to taste
+
+  const offsetX = targetCenterX - currentCenterX;
+  const offsetY = targetCenterY - currentCenterY;
+
+  // --- quads + depth sorting ---
+
+  // simple depth metric: larger = nearer to viewer
+  const pointDepth = (p: Point3D) => p.x + p.y + p.z;
+
+  const quads: Quad2D[] = [];
+
+  for (let y = 0; y < rows - 1; y++) {
+    for (let x = 0; x < cols - 1; x++) {
+      const idx00 = y * cols + x;
+      const idx10 = y * cols + (x + 1);
+      const idx11 = (y + 1) * cols + (x + 1);
+      const idx01 = (y + 1) * cols + x;
+
+      const p00 = surfacePoints[idx00];
+      const p10 = surfacePoints[idx10];
+      const p11 = surfacePoints[idx11];
+      const p01 = surfacePoints[idx01];
+
+      const corners3D: Point3D[] = [p00, p10, p11, p01];
+      const corners2D: Point2D[] = corners3D.map((p) =>
+        projectIso(p, projection)
+      );
+
+      const depth =
+        corners3D.reduce((sum, p) => sum + pointDepth(p), 0) /
+        corners3D.length;
+
+      quads.push({
+        points2D: corners2D,
+        depth,
+      });
+    }
+  }
+
+  // painter's algorithm: draw far → near
+  quads.sort((a, b) => a.depth - b.depth);
+
+  // --- isolines: red (years), black (ages), blue (cohorts) ---
+
+  // RED: year lines (each column), heavy every 25 years
+  const yearLines = years.map((year, colIndex) => {
+    const pts: Point2D[] = [];
+    for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+    const heavy =
+      (year - years[0]) % vizStyle.years.heavyStep === 0;
+    return { year, points: pts, heavy };
+  });
+
+  // BLACK: age lines (each row), heavy every 25 years of age
+  const ageLines = ages.map((age, rowIndex) => {
+    const pts: Point2D[] = [];
+    for (let colIndex = 0; colIndex < cols; colIndex++) {
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+    const heavy =
+      (age - ages[0]) % vizStyle.ages.heavyStep === 0;
+    return { age, points: pts, heavy };
+  });
+
+  // Cohort birth years: derive from the table itself.
+  // For every (year, age) pair we know birthYear = year - age.
+  // This guarantees we include cohorts born *before* the first table year.
+  const cohortBirthYears = Array.from(
+    new Set(swedenRows.map((row) => row.year - row.age))
+  ).sort((a, b) => a - b);
+
+  // BLUE: cohort lines (birth-year diagonals), based on the 5-year age grid
+  type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
+  const cohortLines: CohortLine[] = [];
+
+  const minYear = years[0];
+  const maxAge = ages[ages.length - 1];
+
+  for (const birthYear of cohortBirthYears) {
+    const pts: Point2D[] = [];
+
+    for (const year of years) {
+      const age = year - birthYear;
+      if (age < 0 || age > maxAge) continue;
+      if (age % 5 !== 0) continue; // snap to 5-year age grid
+
+      const rowIndex = ages.indexOf(age);
+      const colIndex = years.indexOf(year);
+      if (rowIndex === -1 || colIndex === -1) continue;
+
+      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+    }
+
+    if (pts.length > 1) {
+      const heavy =
+        (birthYear - minYear) % vizStyle.cohorts.heavyStep === 0;
+      cohortLines.push({ birthYear, points: pts, heavy });
+    }
+  }
+
+  // --- GREEN: value isolines (precomputed in data space, then interpolated on surface) ---
+
+  const yearToColIndex = new Map<number, number>();
+  years.forEach((y, i) => yearToColIndex.set(y, i));
+
+  function findRowBelow(age: number): number {
+    if (age < ages[0] || age > ages[ages.length - 1]) return -1;
+    for (let i = 0; i < ages.length - 1; i++) {
+      if (age >= ages[i] && age <= ages[i + 1]) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  const contourPolylines2D = contourData.map((iso) => {
+    const pts: Point2D[] = [];
+
+    for (const pt of iso.points) {
+      const col = yearToColIndex.get(pt.year);
+      if (col == null) continue;
+
+      const rowBelow = findRowBelow(pt.age);
+      if (rowBelow < 0 || rowBelow >= rows - 1) continue;
+
+      const age0 = ages[rowBelow];
+      const age1 = ages[rowBelow + 1];
+      const t = (pt.age - age0) / (age1 - age0);
+
+      const p0 = projectedSurface[rowBelow * cols + col];
+      const p1 = projectedSurface[(rowBelow + 1) * cols + col];
+
+      const x = p0.x + t * (p1.x - p0.x);
+      const y = p0.y + t * (p1.y - p0.y);
+
+      pts.push({ x, y });
+    }
+
+    return {
+      level: iso.level,
+      points: pts,
+    };
+  });
 
   return (
     <div
@@ -402,10 +337,10 @@ export default function AppPlayground() {
           so they don't "bridge" above the ridge line.*/}
           <defs>
             <clipPath id="greenClip">
+              {/* NOTE: curly braces here */}
               <polygon points={silhouettePoints} />
             </clipPath>
           </defs>
-
           {/* base plane */}
           <polygon
             points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
