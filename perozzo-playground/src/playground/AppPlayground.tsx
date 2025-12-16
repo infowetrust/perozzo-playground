@@ -20,29 +20,39 @@ import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 
 // NOTE: generated offline by `npm run build:contours` from porozzo-tidy.csv
 import contourRaw from "../data/porozzo-contours.json";
+import RightWall from "./layers/RightWall";
+import FloorAgeLines from "./layers/FloorAgeLines";
+import BackWall from "./layers/BackWall";
 
 type ContourPointFile = { year: number; age: number };
 type ContourFile = { level: number; points: ContourPointFile[] };
 
 const contourData = contourRaw as ContourFile[];
 
-const WIDTH = 800;
-const HEIGHT = 500;
+const WIDTH = 700;
+const HEIGHT = 700;
 const FLOOR_DEPTH = 0;
+const EXTEND_LEFT_YEARS = 30;
+const EXTEND_RIGHT_YEARS = 20;
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
 const vizStyle = {
   page: {
-    background: "#111",
+    background: "ivory",
     text: "#eee",
   },
   svg: {
-    border: "#555",
-    background: "#181818",
+    border: "none",
+    background: "ivory",
+    stroke: "none",
   },
   floor: {
-    fill: "#292929ff",
+    fill: "none",
+    stroke: "none" as "none",
+  },
+  wall: {
+    fill: "none",
     stroke: "none" as "none",
   },
   surface: {
@@ -52,8 +62,8 @@ const vizStyle = {
   },
   years: {
     stroke: "#c0392b",
-    thinWidth: 0.5,
-    thickWidth: 1,
+    thinWidth: 0.25,
+    thickWidth: .75,
     heavyStep: 25, // emphasize every ## years
   },
   ages: {
@@ -63,13 +73,13 @@ const vizStyle = {
     heavyStep: 25, // emphasize every ## years
   },
   cohorts: {
-    stroke: "#2980b9",
+    stroke: "SteelBlue",
     thinWidth: 0.5,
     thickWidth: 1,
     heavyStep: 25, // emphasize every ## years
   },
   values: {
-    stroke: "#2ecc71",
+    stroke: "DarkSeaGreen",
     thinWidth: 0.5,
     thickWidth: 1,
     heavyStep: 50_000,
@@ -93,7 +103,7 @@ type ValueContour2D = { level: number; points: Point2D[] };
 
 const swedenRows = parseSwedenCsv(swedenCsv);
 
-/* ---------- GEOMETRY / LAYER HELPERS (Axis 2 refactor) ---------- */
+/* ---------- GEOMETRY / LAYER HELPERS ---------- */
 
 // simple depth metric: larger = nearer to viewer
 function pointDepth3D(p: Point3D): number {
@@ -160,7 +170,7 @@ function buildYearLines(
 function buildAgeLines(
   projectedSurface: Point2D[],
   ages: number[],
-  rows: number,
+  _rows: number,
   cols: number
 ): AgeLine[] {
   return ages.map((age, rowIndex) => {
@@ -178,7 +188,7 @@ function buildCohortLines(
   projectedSurface: Point2D[],
   years: number[],
   ages: number[],
-  rows: number,
+  _rows: number,
   cols: number
 ): CohortLine[] {
   const cohortBirthYears = Array.from(
@@ -219,12 +229,9 @@ function buildValueContours2D(
   projectedSurface: Point2D[],
   ages: number[],
   years: number[],
-  rows: number,
+  _rows: number,
   cols: number
 ): ValueContour2D[] {
-  const yearToColIndex = new Map<number, number>();
-  years.forEach((y, i) => yearToColIndex.set(y, i));
-
   function findRowBelow(age: number): number {
     if (age < ages[0] || age > ages[ages.length - 1]) return -1;
     for (let i = 0; i < ages.length - 1; i++) {
@@ -235,25 +242,49 @@ function buildValueContours2D(
     return -1;
   }
 
+  function findColLeft(year: number): number {
+    if (year < years[0] || year > years[years.length - 1]) return -1;
+    for (let i = 0; i < years.length - 1; i++) {
+      if (year >= years[i] && year <= years[i + 1]) return i;
+    }
+    return -1;
+  }
+
   return contours.map((iso) => {
     const pts: Point2D[] = [];
 
-    for (const pt of iso.points) {
-      const col = yearToColIndex.get(pt.year);
-      if (col == null) continue;
+    const contourPts = iso.points;
+
+    for (const pt of contourPts) {
+      const colLeft = findColLeft(pt.year);
+      if (colLeft < 0) continue;
+
+      const colRight = Math.min(colLeft + 1, cols - 1);
+      const y0 = years[colLeft];
+      const y1 = years[colRight];
+      const ty = y1 === y0 ? 0 : (pt.year - y0) / (y1 - y0);
 
       const rowBelow = findRowBelow(pt.age);
-      if (rowBelow < 0 || rowBelow >= rows - 1) continue;
+      if (rowBelow < 0 || rowBelow >= _rows - 1) continue;
 
       const age0 = ages[rowBelow];
       const age1 = ages[rowBelow + 1];
-      const t = (pt.age - age0) / (age1 - age0);
+      const ta = (pt.age - age0) / (age1 - age0);
 
-      const p0 = projectedSurface[rowBelow * cols + col];
-      const p1 = projectedSurface[(rowBelow + 1) * cols + col];
+      const p00 = projectedSurface[rowBelow * cols + colLeft];
+      const p10 = projectedSurface[rowBelow * cols + colRight];
+      const p01 = projectedSurface[(rowBelow + 1) * cols + colLeft];
+      const p11 = projectedSurface[(rowBelow + 1) * cols + colRight];
 
-      const x = p0.x + t * (p1.x - p0.x);
-      const y = p0.y + t * (p1.y - p0.y);
+      // Interpolate along year at the two age rows
+      const q0x = p00.x + ty * (p10.x - p00.x);
+      const q0y = p00.y + ty * (p10.y - p00.y);
+      const q1x = p01.x + ty * (p11.x - p01.x);
+      const q1y = p01.y + ty * (p11.y - p01.y);
+
+      // Then interpolate along age between those two
+      const x = q0x + ta * (q1x - q0x);
+      const y = q0y + ta * (q1y - q0y);
 
       pts.push({ x, y });
     }
@@ -300,7 +331,7 @@ function computeAutoCenterOffset(
 /* --------------------------- MAIN COMPONENT --------------------------- */
 
 export default function AppPlayground() {
-  const [preset, setPreset] = useState<ProjectionPreset>("perozzoBasic");
+  const [preset, setPreset] = useState<ProjectionPreset>("steep45");
 
   // camera / projection based on preset
   const projection: ProjectionOptions = projectionForPreset(
@@ -311,18 +342,70 @@ export default function AppPlayground() {
 
   // Sweden surface in core space (includes age 0 as first row)
   const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight: 3 });
+  const maxSurvivors = swedenRows.reduce(
+    (max, row) => Math.max(max, row.survivors),
+    0
+  );
   const surfacePoints: Point3D[] = swedenSurface.points;
   const rows = swedenSurface.rows;
   const cols = swedenSurface.cols;
   const years = swedenSurface.years;
   const ages = swedenSurface.ages;
+  const minYearExt = years[0] - EXTEND_LEFT_YEARS;
+  const maxYearExt = years[years.length - 1] + EXTEND_RIGHT_YEARS;
+  const MAX_AGE_FOR_FRAME = 110;
+  const MAX_VALUE_FOR_FRAME = 325_000;
+  const yearStep = years.length > 1 ? years[1] - years[0] : 5;
+  const ageStep = ages.length > 1 ? ages[1] - ages[0] : 5;
+  const baseOrigin = surfacePoints[0];
+  const baseYearPoint = surfacePoints[1];
+  const baseAgePoint = surfacePoints[cols];
+  const dxYear =
+    baseYearPoint && baseOrigin ? baseYearPoint.x - baseOrigin.x : 0;
+  const dyYear =
+    baseYearPoint && baseOrigin ? baseYearPoint.y - baseOrigin.y : 0;
+  const dxAge =
+    baseAgePoint && baseOrigin ? baseAgePoint.x - baseOrigin.x : 0;
+  const dyAge =
+    baseAgePoint && baseOrigin ? baseAgePoint.y - baseOrigin.y : 0;
+  const maxZ = surfacePoints.reduce(
+    (max, pt) => (pt.z > max ? pt.z : max),
+    0
+  );
+
+  function projectYearAgeValueTo2D(
+    year: number,
+    age: number,
+    value: number
+  ): Point2D {
+    const base = baseOrigin ?? { x: 0, y: 0, z: 0 };
+    const yearSteps = yearStep !== 0 ? (year - years[0]) / yearStep : 0;
+    const ageSteps = ageStep !== 0 ? (age - ages[0]) / ageStep : 0;
+    const x = base.x + yearSteps * dxYear + ageSteps * dxAge;
+    const y = base.y + yearSteps * dyYear + ageSteps * dyAge;
+    const z =
+      maxSurvivors > 0 && maxZ > 0 ? (value / maxSurvivors) * maxZ : 0;
+    return projectIso({ x, y, z }, projection);
+  }
+
+  const floorFramePoints = [
+    projectYearAgeValueTo2D(minYearExt, 0, 0),
+    projectYearAgeValueTo2D(minYearExt, MAX_AGE_FOR_FRAME, 0),
+    projectYearAgeValueTo2D(maxYearExt, MAX_AGE_FOR_FRAME, 0),
+    projectYearAgeValueTo2D(maxYearExt, 0, 0),
+    projectYearAgeValueTo2D(minYearExt, 0, 0),
+  ];
+
+  const backWallFramePoints = [
+    projectYearAgeValueTo2D(minYearExt, 0, 0),
+    projectYearAgeValueTo2D(maxYearExt, 0, 0),
+    projectYearAgeValueTo2D(maxYearExt, 0, MAX_VALUE_FOR_FRAME),
+    projectYearAgeValueTo2D(minYearExt, 0, MAX_VALUE_FOR_FRAME),
+    projectYearAgeValueTo2D(minYearExt, 0, 0),
+  ];
 
   // project main surface + floor
   const projectedSurface: Point2D[] = projectSurface(surfacePoints, projection);
-
-  // silhouette polygon for clipping green value lines
-  const silhouettePts = buildSurfaceSilhouette2D(projectedSurface, rows, cols);
-  const silhouettePoints = silhouettePts.map((p) => `${p.x},${p.y}`).join(" ");
 
   const floorPoints: Point2D[] = floorPolygon(
     rows,
@@ -375,20 +458,6 @@ export default function AppPlayground() {
       <h1>Perozzo Playground</h1>
       <p>Sweden survivorship surface with Perozzo-style meshes.</p>
 
-      <div style={{ marginBottom: "0.75rem" }}>
-        <label>
-          Projection preset:{" "}
-          <select
-            value={preset}
-            onChange={(e) => setPreset(e.target.value as ProjectionPreset)}
-          >
-            <option value="perozzoBasic">Perozzo basic</option>
-            <option value="isometric30">Isometric (30°)</option>
-            <option value="steep45">Steep 19th-c plate</option>
-          </select>
-        </label>
-      </div>
-
       <svg
         width={WIDTH}
         height={HEIGHT}
@@ -398,19 +467,87 @@ export default function AppPlayground() {
         }}
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
-          {/*Green value isolines are clipped to the visible surface silhouette
-          so they don't "bridge" above the ridge line.*/}
-          <defs>
-            <clipPath id="greenClip">
-              <polygon points={silhouettePoints} />
-            </clipPath>
-          </defs>
-
+          <FloorAgeLines
+            surfacePoints={surfacePoints}
+            rows={rows}
+            cols={cols}
+            projection={projection}
+            floorZ={FLOOR_DEPTH}
+            years={years}
+            ages={ages}
+            heavyAges={[0, 25, 50, 75, 100]}
+            extendLeftYears={EXTEND_LEFT_YEARS}
+            extendRightYears={EXTEND_RIGHT_YEARS}
+            style={{
+              stroke: vizStyle.ages.stroke,
+              strokeWidth: vizStyle.ages.thickWidth,
+            }}
+          />
+          <BackWall
+            surfacePoints={surfacePoints}
+            rows={rows}
+            cols={cols}
+            projection={projection}
+            floorZ={FLOOR_DEPTH}
+            years={years}
+            ages={ages}
+            maxSurvivors={maxSurvivors}
+            extendLeftYears={EXTEND_LEFT_YEARS}
+            extendRightYears={EXTEND_RIGHT_YEARS}
+            majorStep={50_000}
+            style={{
+              stroke: vizStyle.values.stroke,
+              thinWidth: vizStyle.values.thinWidth,
+              thickWidth: vizStyle.values.thickWidth,
+              heavyStep: vizStyle.values.heavyStep,
+            }}
+          />
+          <polyline
+            points={floorFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill="none"
+            stroke={vizStyle.ages.stroke}
+            strokeWidth={vizStyle.ages.thickWidth}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <polyline
+            points={backWallFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill="none"
+            stroke={vizStyle.ages.stroke}
+            strokeWidth={vizStyle.ages.thickWidth}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
           {/* base plane */}
           <polygon
             points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
             fill={vizStyle.floor.fill}
             stroke={vizStyle.floor.stroke}
+          />
+          <RightWall
+            surfacePoints={surfacePoints}
+            rows={rows}
+            cols={cols}
+            projection={projection}
+            floorZ={FLOOR_DEPTH}
+            ages={ages}
+            maxSurvivors={maxSurvivors}
+            valueStep={vizStyle.values.heavyStep}
+            style={{
+              wallFill: vizStyle.wall.fill,
+              wallStroke: vizStyle.wall.stroke,
+              ageStroke: vizStyle.ages.stroke,
+              ageThin: vizStyle.ages.thinWidth,
+              ageThick: vizStyle.ages.thickWidth,
+              ageHeavyStep: vizStyle.ages.heavyStep,
+              valueStroke: vizStyle.values.stroke,
+              valueThin: vizStyle.values.thinWidth,
+              valueThick: vizStyle.values.thickWidth,
+              valueHeavyStep: vizStyle.values.heavyStep,
+              surfaceFill: vizStyle.surface.fill,
+              surfaceStroke: vizStyle.surface.stroke,
+              surfaceStrokeWidth: vizStyle.surface.strokeWidth,
+            }}
           />
 
           {/* main surface quads */}
@@ -421,23 +558,6 @@ export default function AppPlayground() {
               fill={vizStyle.surface.fill}
               stroke={vizStyle.surface.stroke}
               strokeWidth={vizStyle.surface.strokeWidth}
-            />
-          ))}
-
-          {/* RED: year isolines */}
-          {yearLines.map((line) => (
-            <polyline
-              key={`year-${line.year}`}
-              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke={vizStyle.years.stroke}
-              strokeWidth={
-                line.heavy
-                  ? vizStyle.years.thickWidth
-                  : vizStyle.years.thinWidth
-              }
-              strokeLinecap="round"
-              strokeLinejoin="round"
             />
           ))}
 
@@ -459,7 +579,7 @@ export default function AppPlayground() {
           ))}
 
           {/* GREEN value isolines, clipped to the sheet */}
-          <g clipPath="url(#greenClip)">
+          <g>
             {contourPolylines2D.map((iso, i) => (
               <polyline
                 key={`val-${iso.level}-${i}`}
@@ -488,6 +608,23 @@ export default function AppPlayground() {
                 line.heavy
                   ? vizStyle.ages.thickWidth
                   : vizStyle.ages.thinWidth
+              }
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ))}
+
+          {/* RED: year isolines */}
+          {yearLines.map((line) => (
+            <polyline
+              key={`year-${line.year}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.years.stroke}
+              strokeWidth={
+                line.heavy
+                  ? vizStyle.years.thickWidth
+                  : vizStyle.years.thinWidth
               }
               strokeLinecap="round"
               strokeLinejoin="round"

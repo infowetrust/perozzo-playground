@@ -84,7 +84,7 @@ const isoLines = computeVerticalIsoLines(field, levels);
 const jsonReady = isoLines.map((iso) => ({
   level: iso.level,
   points: iso.points.map((p) => ({
-    year: years[p.yearIndex],
+    year: p.year,
     age: p.age,
   })),
 }));
