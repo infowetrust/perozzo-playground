@@ -14,6 +14,12 @@ import {
   type ProjectionPreset,
 } from "../core/geometry";
 import type { Point2D, Point3D } from "../core/types";
+import {
+  normalize3,
+  quadNormal,
+  lambert,
+  inkAlphaFromBrightness,
+} from "./shading";
 
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
@@ -40,6 +46,8 @@ const EXTEND_RIGHT_YEARS = 20;
 // If you want to art-direct the plate, tweak values here.
 const LINE_THIN_WIDTH = 0.5;
 const LINE_THICK_WIDTH = 1;
+const LINE_THIN_OPACITY = 0.5;
+const LINE_THICK_OPACITY = 0.9;
 
 const vizStyle = {
   page: {
@@ -68,25 +76,72 @@ const vizStyle = {
     stroke: "#c0392b",
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
+    thinOpacity: LINE_THIN_OPACITY,
+    thickOpacity: LINE_THICK_OPACITY,
     heavyStep: 25, // emphasize every ## years
   },
   ages: {
     stroke: "gray",
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
+    thinOpacity: LINE_THIN_OPACITY,
+    thickOpacity: LINE_THICK_OPACITY,
     heavyStep: 25, // emphasize every ## years
   },
   cohorts: {
     stroke: "SteelBlue",
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
+    thinOpacity: LINE_THIN_OPACITY,
+    thickOpacity: LINE_THICK_OPACITY,
     heavyStep: 25, // emphasize every ## years
   },
   values: {
     stroke: "DarkSeaGreen",
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
+    thinOpacity: LINE_THIN_OPACITY,
+    thickOpacity: LINE_THICK_OPACITY,
     heavyStep: 50_000,
+  },
+  // lightDir is the *direction the light is coming from* in our model’s 3D (core) space.
+  // We treat each quad as a tiny flat facet with a 3D normal. The dot(normal, lightDir)
+  // tells us how directly that facet faces the light:
+  //
+  //   dot ≈ 1   → facet faces the light → brighter fill
+  //   dot ≈ 0   → facet is sideways to the light → only ambient fill
+  //   dot < 0   → facet faces away → we clamp to 0 (no diffuse)
+  //
+  // The components mean:
+  //
+  //   x: pushes light along the model’s X axis (roughly “year” direction on the sheet)
+  //      negative x = light from the left; positive x = light from the right
+  //
+  //   y: pushes light along the model’s Y axis (roughly “age/depth” direction on the sheet)
+  //      negative y = light from the front/toward viewer; positive y = light from the back
+  //
+  //   z: pushes light along the model’s Z axis (height/value)
+  //      larger z = more “overhead” lighting (flatter); smaller z = more “grazing” (more relief)
+  //
+  // We normalize this vector, so only its *direction* matters, not its magnitude.
+  // Example: {x:-1, y:-0.3, z:0.6} = a slightly overhead light coming from upper-left/front.
+  shading: {
+    enabled: true,
+    ambient: 0.35,
+    diffuse: 0.65,
+    steps: 5,
+    lightDir: { x: -1.0, y: -0.3, z: 0.4 },
+    inkColor: "#b3a191ff",
+    inkAlphaMax: 0.25,
+    gamma: .4,
+    shadowBias: 0.6,
+    // higher alpha scale is darker
+    alphaScale: {
+      surface: 1,
+      backWall: .5,
+      rightWall: 0.5,
+      floor: 0.3,
+    },
   },
   debugPoints: {
     fill: "#ffcc66",
@@ -98,6 +153,7 @@ const vizStyle = {
 type Quad2D = {
   points2D: Point2D[];
   depth: number;
+  corners3D: Point3D[];
 };
 
 type YearLine = { year: number; points: Point2D[]; heavy: boolean };
@@ -146,6 +202,7 @@ function buildQuads(
       quads.push({
         points2D: corners2D,
         depth,
+        corners3D,
       });
     }
   }
@@ -368,6 +425,33 @@ export default function AppPlayground() {
   const maxYearExt = frame.maxYear + EXTEND_RIGHT_YEARS;
   const FRAME_MAX_AGE = 110;
   const FRAME_MAX_VALUE = 325_000;
+  const shadingConfig = vizStyle.shading;
+  const lightDir = normalize3(shadingConfig.lightDir);
+  const floorNormal = quadNormal(
+    frame.point(minYearExt, 0, 0),
+    frame.point(minYearExt, 25, 0),
+    frame.point(frame.minYear, 0, 0)
+  );
+  const floorBrightness = lambert(
+    floorNormal,
+    lightDir,
+    shadingConfig.ambient,
+    shadingConfig.diffuse
+  );
+  const floorAlpha =
+    shadingConfig.enabled
+      ? inkAlphaFromBrightness({
+        brightness: floorBrightness,
+        ambient: shadingConfig.ambient,
+        diffuse: shadingConfig.diffuse,
+        steps: shadingConfig.steps,
+        inkAlphaMax: shadingConfig.inkAlphaMax,
+        gamma: shadingConfig.gamma,
+        shadowBias: shadingConfig.shadowBias,
+        alphaScale: shadingConfig.alphaScale.floor,
+      })
+      : 0;
+
   const floorFramePoints = [
     projectIso(frame.point(minYearExt, 0, 0), projection),
     projectIso(frame.point(minYearExt, FRAME_MAX_AGE, 0), projection),
@@ -382,6 +466,9 @@ export default function AppPlayground() {
     projectIso(frame.point(minYearExt, 0, FRAME_MAX_VALUE), projection),
     projectIso(frame.point(minYearExt, 0, 0), projection),
   ];
+  const floorFrameString = floorFramePoints
+    .map((p) => `${p.x},${p.y}`)
+    .join(" ");
 
 
   // project main surface + floor
@@ -437,7 +524,6 @@ export default function AppPlayground() {
     >
       <h1>Perozzo Playground</h1>
       <p>Sweden survivorship surface with Perozzo-style meshes.</p>
-
       <svg
         width={WIDTH}
         height={HEIGHT}
@@ -448,31 +534,6 @@ export default function AppPlayground() {
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
 
-          {/* base plane */}
-          <polygon
-            points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill={vizStyle.floor.fill}
-            stroke={vizStyle.floor.stroke}
-          />
-          <BackWall
-            surfacePoints={surfacePoints}
-            rows={rows}
-            cols={cols}
-            projection={projection}
-            floorZ={FLOOR_DEPTH}
-            years={years}
-            ages={ages}
-            maxSurvivors={maxSurvivors}
-            extendLeftYears={EXTEND_LEFT_YEARS}
-            extendRightYears={EXTEND_RIGHT_YEARS}
-            majorStep={50_000}
-            style={{
-              stroke: vizStyle.values.stroke,
-              thinWidth: vizStyle.values.thinWidth,
-              thickWidth: vizStyle.values.thickWidth,
-              heavyStep: vizStyle.values.heavyStep,
-            }}
-          />
           <polyline
             points={floorFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
             fill="none"
@@ -489,6 +550,47 @@ export default function AppPlayground() {
             strokeLinecap="round"
             strokeLinejoin="round"
           />
+          <BackWall
+            surfacePoints={surfacePoints}
+            rows={rows}
+            cols={cols}
+            projection={projection}
+            floorZ={FLOOR_DEPTH}
+            years={years}
+            ages={ages}
+            maxSurvivors={maxSurvivors}
+            extendLeftYears={EXTEND_LEFT_YEARS}
+            extendRightYears={EXTEND_RIGHT_YEARS}
+            majorStep={50_000}
+            frame={frame}
+            minYearExt={minYearExt}
+            maxYearExt={maxYearExt}
+            maxValueForFrame={FRAME_MAX_VALUE}
+            shading={shadingConfig}
+            style={{
+              stroke: vizStyle.values.stroke,
+              thinWidth: vizStyle.values.thinWidth,
+              thickWidth: vizStyle.values.thickWidth,
+              heavyStep: vizStyle.values.heavyStep,
+              surfaceFill: vizStyle.surface.fill,
+              thinOpacity: vizStyle.values.thinOpacity,
+              thickOpacity: vizStyle.values.thickOpacity,
+            }}
+          />
+          {/* shaded floor plane */}
+          <polygon
+            points={floorFrameString}
+            fill={vizStyle.surface.fill}
+            stroke={vizStyle.floor.stroke}
+          />
+          {floorAlpha > 0 && (
+            <polygon
+              points={floorFrameString}
+              fill={shadingConfig.inkColor}
+              fillOpacity={floorAlpha}
+              stroke="none"
+            />
+          )}
           <FloorAgeLines
             frame={frame}
             projection={projection}
@@ -509,6 +611,8 @@ export default function AppPlayground() {
             ages={ages}
             maxSurvivors={maxSurvivors}
             valueStep={vizStyle.values.heavyStep}
+            frame={frame}
+            shading={shadingConfig}
             style={{
               wallFill: vizStyle.wall.fill,
               wallStroke: vizStyle.wall.stroke,
@@ -516,10 +620,14 @@ export default function AppPlayground() {
               ageThin: vizStyle.ages.thinWidth,
               ageThick: vizStyle.ages.thickWidth,
               ageHeavyStep: vizStyle.ages.heavyStep,
+              ageThinOpacity: vizStyle.ages.thinOpacity,
+              ageThickOpacity: vizStyle.ages.thickOpacity,
               valueStroke: vizStyle.values.stroke,
               valueThin: vizStyle.values.thinWidth,
               valueThick: vizStyle.values.thickWidth,
               valueHeavyStep: vizStyle.values.heavyStep,
+              valueThinOpacity: vizStyle.values.thinOpacity,
+              valueThickOpacity: vizStyle.values.thickOpacity,
               surfaceFill: vizStyle.surface.fill,
               surfaceStroke: vizStyle.surface.stroke,
               surfaceStrokeWidth: vizStyle.surface.strokeWidth,
@@ -527,32 +635,62 @@ export default function AppPlayground() {
           />
 
           {/* main surface quads */}
-          {quads.map((quad, i) => (
-            <polygon
-              key={i}
-              points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill={vizStyle.surface.fill}
-              stroke={vizStyle.surface.stroke}
-              strokeWidth={vizStyle.surface.strokeWidth}
-            />
-          ))}
+          {quads.map((quad, i) => {
+            const base = (
+              <polygon
+                points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill={vizStyle.surface.fill}
+                stroke={vizStyle.surface.stroke}
+                strokeWidth={vizStyle.surface.strokeWidth}
+              />
+            );
 
-          {/* BLUE: cohort lines */}
-          {cohortLines.map((line) => (
-            <polyline
-              key={`cohort-${line.birthYear}`}
-              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke={vizStyle.cohorts.stroke}
-              strokeWidth={
-                line.heavy
-                  ? vizStyle.cohorts.thickWidth
-                  : vizStyle.cohorts.thinWidth
-              }
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          ))}
+            if (!shadingConfig.enabled) {
+              return <g key={`quad-${i}`}>{base}</g>;
+            }
+
+            let normal = quadNormal(
+              quad.corners3D[0],
+              quad.corners3D[1],
+              quad.corners3D[3]
+            );
+            if (normal.z < 0) {
+              normal = { x: -normal.x, y: -normal.y, z: -normal.z };
+            }
+            const brightness = lambert(
+              normal,
+              lightDir,
+              shadingConfig.ambient,
+              shadingConfig.diffuse
+            );
+            const alpha = inkAlphaFromBrightness({
+              brightness,
+              ambient: shadingConfig.ambient,
+              diffuse: shadingConfig.diffuse,
+              steps: shadingConfig.steps,
+              inkAlphaMax: shadingConfig.inkAlphaMax,
+              gamma: shadingConfig.gamma,
+              shadowBias: shadingConfig.shadowBias,
+              alphaScale: shadingConfig.alphaScale.surface,
+            });
+
+            return (
+              <g key={`quad-${i}`}>
+                {base}
+                {alpha > 0 && (
+                  <polygon
+                    points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill={shadingConfig.inkColor}
+                    fillOpacity={Math.min(
+                      1,
+                      alpha * shadingConfig.alphaScale.surface
+                    )}
+                    stroke="none"
+                  />
+                )}
+              </g>
+            );
+          })}
 
           {/* GREEN value isolines, clipped to the sheet */}
           <g>
@@ -567,11 +705,38 @@ export default function AppPlayground() {
                     ? vizStyle.values.thickWidth
                     : vizStyle.values.thinWidth
                 }
+                strokeOpacity={
+                  iso.level % vizStyle.values.heavyStep === 0
+                    ? vizStyle.values.thickOpacity
+                    : vizStyle.values.thinOpacity
+                }
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
             ))}
           </g>
+
+          {/* BLUE: cohort lines */}
+          {cohortLines.map((line) => (
+            <polyline
+              key={`cohort-${line.birthYear}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.cohorts.stroke}
+              strokeWidth={
+                line.heavy
+                  ? vizStyle.cohorts.thickWidth
+                  : vizStyle.cohorts.thinWidth
+              }
+              strokeOpacity={
+                line.heavy
+                  ? vizStyle.cohorts.thickOpacity
+                  : vizStyle.cohorts.thinOpacity
+              }
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          ))}
 
           {/* BLACK: age isolines */}
           {ageLines.map((line) => (
@@ -584,6 +749,11 @@ export default function AppPlayground() {
                 line.heavy
                   ? vizStyle.ages.thickWidth
                   : vizStyle.ages.thinWidth
+              }
+              strokeOpacity={
+                line.heavy
+                  ? vizStyle.ages.thickOpacity
+                  : vizStyle.ages.thinOpacity
               }
               strokeLinecap="round"
               strokeLinejoin="round"
@@ -601,6 +771,11 @@ export default function AppPlayground() {
                 line.heavy
                   ? vizStyle.years.thickWidth
                   : vizStyle.years.thinWidth
+              }
+              strokeOpacity={
+                line.heavy
+                  ? vizStyle.years.thickOpacity
+                  : vizStyle.years.thinOpacity
               }
               strokeLinecap="round"
               strokeLinejoin="round"

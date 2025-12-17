@@ -1,11 +1,21 @@
 import { projectIso, type ProjectionOptions } from "../../core/geometry";
+import { type Frame3D } from "../../core/frame3d";
 import type { Point2D, Point3D } from "../../core/types";
+import {
+  normalize3,
+  quadNormal,
+  lambert,
+  inkAlphaFromBrightness,
+} from "../shading";
 
 type BackWallStyle = {
   stroke: string;
   thinWidth: number;
   thickWidth: number;
   heavyStep: number;
+  surfaceFill: string;
+  thinOpacity: number;
+  thickOpacity: number;
 };
 
 type BackWallProps = {
@@ -20,6 +30,27 @@ type BackWallProps = {
   extendLeftYears: number;
   extendRightYears: number;
   majorStep: number;
+  frame: Frame3D;
+  minYearExt: number;
+  maxYearExt: number;
+  maxValueForFrame: number;
+  shading?: {
+    enabled: boolean;
+    ambient: number;
+    diffuse: number;
+    steps: number;
+    lightDir: { x: number; y: number; z: number };
+    inkColor: string;
+    inkAlphaMax: number;
+    gamma: number;
+    shadowBias: number;
+    alphaScale?: {
+      surface?: number;
+      backWall?: number;
+      rightWall?: number;
+      floor?: number;
+    };
+  };
   style: BackWallStyle;
 };
 
@@ -35,6 +66,11 @@ export default function BackWall({
   extendLeftYears,
   extendRightYears,
   majorStep,
+  frame,
+  minYearExt,
+  maxYearExt,
+  maxValueForFrame,
+  shading,
   style,
 }: BackWallProps) {
   if (rows <= 0 || cols < 2 || surfacePoints.length < rows * cols) {
@@ -87,9 +123,51 @@ export default function BackWall({
   }
 
   const kEnd = (cols - 1) + stepsRight;
+  const shadingConfig = shading && shading.enabled ? shading : null;
+  const lightVec = shadingConfig ? normalize3(shadingConfig.lightDir) : null;
+  const planeCorners3D = [
+    frame.point(minYearExt, 0, 0),
+    frame.point(maxYearExt, 0, 0),
+    frame.point(maxYearExt, 0, maxValueForFrame),
+    frame.point(minYearExt, 0, maxValueForFrame),
+  ];
+  const planePoints2D = planeCorners3D.map((p) => projectIso(p, projection));
+  const planeString = planePoints2D.map((p) => `${p.x},${p.y}`).join(" ");
+  const planeNormal =
+    shadingConfig && lightVec
+      ? quadNormal(planeCorners3D[0], planeCorners3D[1], planeCorners3D[3])
+      : null;
+  const planeAlpha =
+    shadingConfig && lightVec && planeNormal
+      ? inkAlphaFromBrightness({
+          brightness: lambert(
+            planeNormal,
+            lightVec,
+            shadingConfig.ambient,
+            shadingConfig.diffuse
+          ),
+          ambient: shadingConfig.ambient,
+          diffuse: shadingConfig.diffuse,
+          steps: shadingConfig.steps,
+          inkAlphaMax: shadingConfig.inkAlphaMax,
+          gamma: shadingConfig.gamma,
+          shadowBias: shadingConfig.shadowBias,
+          alphaScale: shadingConfig.alphaScale?.backWall ?? 1,
+        })
+      : 0;
 
   return (
     <>
+      <polygon points={planeString} fill={style.surfaceFill} stroke="none" />
+      {planeAlpha > 0 && shadingConfig && (
+        <polygon
+          points={planeString}
+          fill={shadingConfig.inkColor}
+          fillOpacity={Math.min(1, planeAlpha)}
+          stroke="none"
+        />
+      )}
+
       {levels.map((level) => {
         const zRatio = maxSurvivors > 0 ? level / maxSurvivors : 0;
         const zLevel = zRatio * (maxZ || 0);
@@ -117,6 +195,11 @@ export default function BackWall({
             fill="none"
             stroke={style.stroke}
             strokeWidth={strokeWidth}
+            strokeOpacity={
+              style.heavyStep > 0 && level % style.heavyStep === 0
+                ? style.thickOpacity
+                : style.thinOpacity
+            }
             strokeLinecap="round"
             strokeLinejoin="round"
           />
