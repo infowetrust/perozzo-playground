@@ -5,15 +5,84 @@ Reusable functions for generating and projecting 3D surfaces.
 
 import type { Point2D, Point3D } from "./types";
 
+export type AxonometricBasis = {
+  origin: { x: number; y: number };
+  basisX: { x: number; y: number };
+  basisY: { x: number; y: number };
+  basisZ: { x: number; y: number };
+};
+
 export type ProjectionOptions = {
   originX: number;
   originY: number;
   scaleXY: number;
   scaleZ: number;
   baseRotation?: number; // radians; rotation of (x,y) before projection
+  basis: AxonometricBasis;
 };
 
-export type ProjectionPreset = "perozzoBasic" | "isometric30" | "steep45";
+type LegacyProjectionParams = {
+  originX: number;
+  originY: number;
+  scaleXY: number;
+  scaleZ: number;
+  baseRotation?: number;
+};
+
+export type ProjectionPreset =
+  | "perozzoBasic"
+  | "isometric30"
+  | "steep45"
+  | "levasseur";
+
+function legacyProjectPoint(
+  p: Point3D,
+  params: LegacyProjectionParams
+): Point2D {
+  const { originX, originY, scaleXY, scaleZ, baseRotation = 0 } = params;
+
+  let bx = p.x;
+  let by = p.y;
+
+  if (baseRotation !== 0) {
+    const cos = Math.cos(baseRotation);
+    const sin = Math.sin(baseRotation);
+    const rx = bx * cos - by * sin;
+    const ry = bx * sin + by * cos;
+    bx = rx;
+    by = ry;
+  }
+
+  const sx = (bx - by) * scaleXY;
+  const sy = (bx + by) * 0.5 * scaleXY - p.z * scaleZ;
+
+  return {
+    x: originX + sx,
+    y: originY + sy,
+  };
+}
+
+function buildBasisFromLegacy(params: LegacyProjectionParams): AxonometricBasis {
+  const origin = legacyProjectPoint({ x: 0, y: 0, z: 0 }, params);
+  const projX = legacyProjectPoint({ x: 1, y: 0, z: 0 }, params);
+  const projY = legacyProjectPoint({ x: 0, y: 1, z: 0 }, params);
+  const projZ = legacyProjectPoint({ x: 0, y: 0, z: 1 }, params);
+
+  return {
+    origin,
+    basisX: { x: projX.x - origin.x, y: projX.y - origin.y },
+    basisY: { x: projY.x - origin.x, y: projY.y - origin.y },
+    basisZ: { x: projZ.x - origin.x, y: projZ.y - origin.y },
+  };
+}
+
+function vectorFromAngle(angleDeg: number, length = 1): { x: number; y: number } {
+  const rad = (angleDeg * Math.PI) / 180;
+  return {
+    x: Math.cos(rad) * length,
+    y: -Math.sin(rad) * length,
+  };
+}
 
 /**
  * Create projection options based on a named historic-ish preset.
@@ -24,47 +93,72 @@ export function projectionForPreset(
   width: number,
   height: number
 ): ProjectionOptions {
+  const withBasis = (params: LegacyProjectionParams): ProjectionOptions => ({
+    ...params,
+    basis: buildBasisFromLegacy(params),
+  });
+
   switch (preset) {
     case "perozzoBasic":
       // close to what you dialed in by eye
-      return {
+      return withBasis({
         originX: width / 2 - 50,
         originY: height - 440,
         scaleXY: 10,
         scaleZ: 80,
         baseRotation: -.5, // start at 0; we can tweak
-      };
+      });
 
     case "isometric30":
       // more classic isometric: lower height, centered origin
-      return {
+      return withBasis({
         originX: width / 2,
         originY: height - 160,
         scaleXY: 12,
         scaleZ: 60,
         baseRotation: -Math.PI / 12, // about -15°
 
-      };
+      });
 
     case "steep45":
       // steeper "statistics plate" look: exaggerated height
-      return {
+      return withBasis({
         originX: width / 2 - 40,
         originY: height - 140,
         scaleXY: 10,
         scaleZ: 120,
         baseRotation: -Math.PI / 7,
 
+      });
+
+    case "levasseur": {
+      const originX = width / 2;
+      const originY = height - 175;
+      const yearScale = 12; // how wide the sheet is
+      const ageScale = 5.5; // how deep the sheet is
+      const valueScale = 120; // how tall the sheet is
+      return {
+        originX,
+        originY,
+        scaleXY: yearScale,
+        scaleZ: valueScale,
+        basis: {
+          origin: { x: originX, y: originY },
+          basisX: vectorFromAngle(0, yearScale),
+          basisY: vectorFromAngle(-125, ageScale),
+          basisZ: vectorFromAngle(90, valueScale),
+        },
       };
+    }
 
     default:
       // fallback
-      return {
+      return withBasis({
         originX: width / 2,
         originY: height - 160,
         scaleXY: 10,
         scaleZ: 80,
-      };
+      });
   }
 }
 
@@ -121,27 +215,12 @@ export function projectIso(
   p: Point3D,
   options: ProjectionOptions
 ): Point2D {
-  const { originX, originY, scaleXY, scaleZ, baseRotation = 0 } = options;
-
-  // rotate base (x,y) around the vertical axis, if requested
-  let bx = p.x;
-  let by = p.y;
-
-  if (baseRotation !== 0) {
-    const cos = Math.cos(baseRotation);
-    const sin = Math.sin(baseRotation);
-    const rx = bx * cos - by * sin;
-    const ry = bx * sin + by * cos;
-    bx = rx;
-    by = ry;
-  }
-
-  const sx = (bx - by) * scaleXY;
-  const sy = (bx + by) * 0.5 * scaleXY - p.z * scaleZ;
+  const { basis } = options;
+  const { origin, basisX, basisY, basisZ } = basis;
 
   return {
-    x: originX + sx,
-    y: originY + sy,
+    x: origin.x + p.x * basisX.x + p.y * basisY.x + p.z * basisZ.x,
+    y: origin.y + p.x * basisX.y + p.y * basisY.y + p.z * basisZ.y,
   };
 }
 

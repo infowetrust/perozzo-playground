@@ -23,6 +23,7 @@ import contourRaw from "../data/porozzo-contours.json";
 import RightWall from "./layers/RightWall";
 import FloorAgeLines from "./layers/FloorAgeLines";
 import BackWall from "./layers/BackWall";
+import { makeFrame3D } from "../core/frame3d";
 
 type ContourPointFile = { year: number; age: number };
 type ContourFile = { level: number; points: ContourPointFile[] };
@@ -37,6 +38,9 @@ const EXTEND_RIGHT_YEARS = 20;
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
+const LINE_THIN_WIDTH = 0.5;
+const LINE_THICK_WIDTH = 1;
+
 const vizStyle = {
   page: {
     background: "ivory",
@@ -62,26 +66,26 @@ const vizStyle = {
   },
   years: {
     stroke: "#c0392b",
-    thinWidth: 0.25,
-    thickWidth: .75,
+    thinWidth: LINE_THIN_WIDTH,
+    thickWidth: LINE_THICK_WIDTH,
     heavyStep: 25, // emphasize every ## years
   },
   ages: {
     stroke: "gray",
-    thinWidth: 0.5,
-    thickWidth: 1,
+    thinWidth: LINE_THIN_WIDTH,
+    thickWidth: LINE_THICK_WIDTH,
     heavyStep: 25, // emphasize every ## years
   },
   cohorts: {
     stroke: "SteelBlue",
-    thinWidth: 0.5,
-    thickWidth: 1,
+    thinWidth: LINE_THIN_WIDTH,
+    thickWidth: LINE_THICK_WIDTH,
     heavyStep: 25, // emphasize every ## years
   },
   values: {
     stroke: "DarkSeaGreen",
-    thinWidth: 0.5,
-    thickWidth: 1,
+    thinWidth: LINE_THIN_WIDTH,
+    thickWidth: LINE_THICK_WIDTH,
     heavyStep: 50_000,
   },
   debugPoints: {
@@ -331,7 +335,7 @@ function computeAutoCenterOffset(
 /* --------------------------- MAIN COMPONENT --------------------------- */
 
 export default function AppPlayground() {
-  const [preset, setPreset] = useState<ProjectionPreset>("steep45");
+  const [preset, setPreset] = useState<ProjectionPreset>("levasseur");
 
   // camera / projection based on preset
   const projection: ProjectionOptions = projectionForPreset(
@@ -351,58 +355,34 @@ export default function AppPlayground() {
   const cols = swedenSurface.cols;
   const years = swedenSurface.years;
   const ages = swedenSurface.ages;
-  const minYearExt = years[0] - EXTEND_LEFT_YEARS;
-  const maxYearExt = years[years.length - 1] + EXTEND_RIGHT_YEARS;
-  const MAX_AGE_FOR_FRAME = 110;
-  const MAX_VALUE_FOR_FRAME = 325_000;
-  const yearStep = years.length > 1 ? years[1] - years[0] : 5;
-  const ageStep = ages.length > 1 ? ages[1] - ages[0] : 5;
-  const baseOrigin = surfacePoints[0];
-  const baseYearPoint = surfacePoints[1];
-  const baseAgePoint = surfacePoints[cols];
-  const dxYear =
-    baseYearPoint && baseOrigin ? baseYearPoint.x - baseOrigin.x : 0;
-  const dyYear =
-    baseYearPoint && baseOrigin ? baseYearPoint.y - baseOrigin.y : 0;
-  const dxAge =
-    baseAgePoint && baseOrigin ? baseAgePoint.x - baseOrigin.x : 0;
-  const dyAge =
-    baseAgePoint && baseOrigin ? baseAgePoint.y - baseOrigin.y : 0;
-  const maxZ = surfacePoints.reduce(
-    (max, pt) => (pt.z > max ? pt.z : max),
-    0
-  );
-
-  function projectYearAgeValueTo2D(
-    year: number,
-    age: number,
-    value: number
-  ): Point2D {
-    const base = baseOrigin ?? { x: 0, y: 0, z: 0 };
-    const yearSteps = yearStep !== 0 ? (year - years[0]) / yearStep : 0;
-    const ageSteps = ageStep !== 0 ? (age - ages[0]) / ageStep : 0;
-    const x = base.x + yearSteps * dxYear + ageSteps * dxAge;
-    const y = base.y + yearSteps * dyYear + ageSteps * dyAge;
-    const z =
-      maxSurvivors > 0 && maxZ > 0 ? (value / maxSurvivors) * maxZ : 0;
-    return projectIso({ x, y, z }, projection);
-  }
-
+  const frame = makeFrame3D({
+    surfacePoints,
+    rows,
+    cols,
+    years,
+    ages,
+    floorZ: FLOOR_DEPTH,
+    maxSurvivors,
+  });
+  const minYearExt = frame.minYear - EXTEND_LEFT_YEARS;
+  const maxYearExt = frame.maxYear + EXTEND_RIGHT_YEARS;
+  const FRAME_MAX_AGE = 110;
+  const FRAME_MAX_VALUE = 325_000;
   const floorFramePoints = [
-    projectYearAgeValueTo2D(minYearExt, 0, 0),
-    projectYearAgeValueTo2D(minYearExt, MAX_AGE_FOR_FRAME, 0),
-    projectYearAgeValueTo2D(maxYearExt, MAX_AGE_FOR_FRAME, 0),
-    projectYearAgeValueTo2D(maxYearExt, 0, 0),
-    projectYearAgeValueTo2D(minYearExt, 0, 0),
+    projectIso(frame.point(minYearExt, 0, 0), projection),
+    projectIso(frame.point(minYearExt, FRAME_MAX_AGE, 0), projection),
+    projectIso(frame.point(maxYearExt, FRAME_MAX_AGE, 0), projection),
+    projectIso(frame.point(maxYearExt, 0, 0), projection),
+    projectIso(frame.point(minYearExt, 0, 0), projection),
+  ];
+  const backWallFramePoints = [
+    projectIso(frame.point(minYearExt, 0, 0), projection),
+    projectIso(frame.point(maxYearExt, 0, 0), projection),
+    projectIso(frame.point(maxYearExt, 0, FRAME_MAX_VALUE), projection),
+    projectIso(frame.point(minYearExt, 0, FRAME_MAX_VALUE), projection),
+    projectIso(frame.point(minYearExt, 0, 0), projection),
   ];
 
-  const backWallFramePoints = [
-    projectYearAgeValueTo2D(minYearExt, 0, 0),
-    projectYearAgeValueTo2D(maxYearExt, 0, 0),
-    projectYearAgeValueTo2D(maxYearExt, 0, MAX_VALUE_FOR_FRAME),
-    projectYearAgeValueTo2D(minYearExt, 0, MAX_VALUE_FOR_FRAME),
-    projectYearAgeValueTo2D(minYearExt, 0, 0),
-  ];
 
   // project main surface + floor
   const projectedSurface: Point2D[] = projectSurface(surfacePoints, projection);
@@ -467,21 +447,12 @@ export default function AppPlayground() {
         }}
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
-          <FloorAgeLines
-            surfacePoints={surfacePoints}
-            rows={rows}
-            cols={cols}
-            projection={projection}
-            floorZ={FLOOR_DEPTH}
-            years={years}
-            ages={ages}
-            heavyAges={[0, 25, 50, 75, 100]}
-            extendLeftYears={EXTEND_LEFT_YEARS}
-            extendRightYears={EXTEND_RIGHT_YEARS}
-            style={{
-              stroke: vizStyle.ages.stroke,
-              strokeWidth: vizStyle.ages.thickWidth,
-            }}
+
+          {/* base plane */}
+          <polygon
+            points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill={vizStyle.floor.fill}
+            stroke={vizStyle.floor.stroke}
           />
           <BackWall
             surfacePoints={surfacePoints}
@@ -506,7 +477,7 @@ export default function AppPlayground() {
             points={floorFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
             fill="none"
             stroke={vizStyle.ages.stroke}
-            strokeWidth={vizStyle.ages.thickWidth}
+            strokeWidth={vizStyle.ages.thinWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -514,15 +485,20 @@ export default function AppPlayground() {
             points={backWallFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
             fill="none"
             stroke={vizStyle.ages.stroke}
-            strokeWidth={vizStyle.ages.thickWidth}
+            strokeWidth={vizStyle.ages.thinWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-          {/* base plane */}
-          <polygon
-            points={floorPoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill={vizStyle.floor.fill}
-            stroke={vizStyle.floor.stroke}
+          <FloorAgeLines
+            frame={frame}
+            projection={projection}
+            heavyAges={[0, 25, 50, 75, 100]}
+            extendLeftYears={EXTEND_LEFT_YEARS}
+            extendRightYears={EXTEND_RIGHT_YEARS}
+            style={{
+              stroke: vizStyle.ages.stroke,
+              strokeWidth: vizStyle.ages.thickWidth,
+            }}
           />
           <RightWall
             surfacePoints={surfacePoints}
