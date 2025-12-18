@@ -33,7 +33,8 @@ export default function BackWallIsolines({
     <>
       {levels.map((level) => {
         const pts = [];
-        for (let year = minYearExt; year <= maxYearExt; year += yearStep) {
+        const startYear = level >= 200_000 ? frame.maxYear : minYearExt;
+        for (let year = startYear; year <= maxYearExt; year += yearStep) {
           pts.push(projectIso(frame.point(year, 0, level), projection));
         }
 

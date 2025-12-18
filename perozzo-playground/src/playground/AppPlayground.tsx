@@ -25,6 +25,8 @@ import TitleBlock, {
   TITLE_BLOCK_HEIGHT,
 } from "./layers/TitleBlock";
 import AgeLabels from "./layers/AgeLabels";
+import ValueIsolineLabels from "./layers/ValueIsolineLabels";
+import YearLabels from "./layers/YearLabels";
 
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
@@ -44,8 +46,8 @@ const contourData = contourRaw as ContourFile[];
 const WIDTH = 700;
 const HEIGHT = 700;
 const FLOOR_DEPTH = 0;
-const EXTEND_LEFT_YEARS = 30;
-const EXTEND_RIGHT_YEARS = 20;
+const EXTEND_LEFT_YEARS = 20;
+const EXTEND_RIGHT_YEARS = 12;
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
@@ -54,6 +56,19 @@ const LINE_THIN_OPACITY = 0.3;
 
 const LINE_THICK_WIDTH = 1;
 const LINE_THICK_OPACITY = 0.9;
+
+const AXIS_LABEL_STYLE = {
+  fontFamily: "garamond, serif",
+  fontSize: 9,
+  fontWeight: 600 as 400 | 500 | 600 | 700,
+  opacity: 0.7,
+};
+
+const AXIS_LABEL_LAYOUT = {
+  side: "both" as const,
+  tickLen: 14,
+  textOffset: 0,
+};
 
 const vizStyle = {
   page: {
@@ -146,7 +161,7 @@ const vizStyle = {
       surface: 1,
       backWall: .5,
       rightWall: 0.5,
-      floor: 0.3,
+      floor: 0,
     },
   },
   debugPoints: {
@@ -168,6 +183,12 @@ type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
 type ValueContour2D = { level: number; points: Point2D[] };
 
 const swedenRows = parseSwedenCsv(swedenCsv);
+const topValueByYear: Record<number, number> = {};
+for (const row of swedenRows) {
+  if (row.age === 0) {
+    topValueByYear[row.year] = row.survivors;
+  }
+}
 
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
 
@@ -549,7 +570,7 @@ export default function AppPlayground() {
             projection={projection}
             minYearExt={minYearExt}
             maxYearExt={maxYearExt}
-            levels={[0, 50_000, 100_000, 150_000, 200_000, 250_000, 300_000]}
+            levels={[0, 50_000, 100_000, 150_000, 200_000, 250_000]}
             style={{
               stroke: vizStyle.values.stroke,
               thinWidth: vizStyle.values.thinWidth,
@@ -588,12 +609,43 @@ export default function AppPlayground() {
             frame={frame}
             projection={projection}
             minYearExt={minYearExt}
+            maxYearExt={maxYearExt}
+            side={AXIS_LABEL_LAYOUT.side}
+            tickLen={AXIS_LABEL_LAYOUT.tickLen}
+            textOffset={AXIS_LABEL_LAYOUT.textOffset}
             style={{
-              stroke: vizStyle.ages.stroke,
-              fontFamily: "serif",
-              fontSize: 12,
-              opacity: vizStyle.ages.thickOpacity,
+              ...AXIS_LABEL_STYLE,
+              color: vizStyle.ages.stroke,
             }}
+          />
+          <ValueIsolineLabels
+            frame={frame}
+            projection={projection}
+            minYearExt={minYearExt}
+            maxYearExt={maxYearExt}
+            side={AXIS_LABEL_LAYOUT.side}
+            tickLen={AXIS_LABEL_LAYOUT.tickLen}
+            textOffset={AXIS_LABEL_LAYOUT.textOffset}
+            style={{
+              ...AXIS_LABEL_STYLE,
+              color: vizStyle.values.stroke,
+            }}
+          />
+          <YearLabels
+            frame={frame}
+            projection={projection}
+            years={years}
+            minYearExt={minYearExt}
+            maxYearExt={maxYearExt}
+            majorStep={25}
+            tickLen={AXIS_LABEL_LAYOUT.tickLen}
+            textOffset={AXIS_LABEL_LAYOUT.textOffset}
+            style={{
+              ...AXIS_LABEL_STYLE,
+              color: vizStyle.years.stroke,
+            }}
+            bottomAngleDeg={-50}
+            topValueByYear={topValueByYear}
           />
           <RightWall
             surfacePoints={surfacePoints}

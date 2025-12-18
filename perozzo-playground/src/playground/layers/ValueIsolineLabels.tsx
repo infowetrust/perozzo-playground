@@ -1,18 +1,11 @@
 import { projectIso, type ProjectionOptions } from "../../core/geometry";
 import type { Frame3D } from "../../core/frame3d";
 import type { Point2D } from "../../core/types";
-
-export type AxisLabelStyle = {
-  color: string;
-  fontFamily: string;
-  fontSize: number;
-  fontWeight: number;
-  opacity: number;
-};
+import type { AxisLabelStyle } from "./AgeLabels";
 
 type LabelSide = "left" | "right";
 
-type AgeLabelsProps = {
+type ValueIsolineLabelsProps = {
   frame: Frame3D;
   projection: ProjectionOptions;
   minYearExt: number;
@@ -23,16 +16,10 @@ type AgeLabelsProps = {
   style: AxisLabelStyle;
 };
 
-const LABEL_AGES = [0, 25, 50, 75, 100];
-const LABEL_TEXT: Record<number, string> = {
-  0: "Born",
-  25: "25",
-  50: "50",
-  75: "75",
-  100: "100",
-};
+const LEFT_LEVELS = [50_000, 100_000, 150_000];
+const RIGHT_LEVELS = [50_000, 100_000, 150_000, 200_000, 250_000];
 
-export default function AgeLabels({
+export default function ValueIsolineLabels({
   frame,
   projection,
   minYearExt,
@@ -41,51 +28,58 @@ export default function AgeLabels({
   tickLen,
   textOffset,
   style,
-}: AgeLabelsProps) {
+}: ValueIsolineLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
 
-  const labelYearFor = (s: LabelSide): number => {
+  const levelsForSide = (s: LabelSide): number[] =>
+    s === "right" ? RIGHT_LEVELS : LEFT_LEVELS;
+
+  const baseYearFor = (s: LabelSide): number => {
     if (s === "right") {
-      return Math.max(maxYearExt - 5, frame.maxYear + 5);
+      return Math.max(maxYearExt - frame.yearStep, frame.maxYear + 5);
     }
-    return Math.min(minYearExt + 5, frame.minYear - 10);
+    return Math.min(minYearExt + frame.yearStep, frame.minYear - 5);
   };
 
-  const inwardYearFor = (s: LabelSide, baseYear: number): number => {
-    return s === "right" ? baseYear - frame.yearStep : baseYear + frame.yearStep;
-  };
+  const inwardYearFor = (s: LabelSide, baseYear: number): number =>
+    s === "right" ? baseYear - frame.yearStep : baseYear + frame.yearStep;
 
-  const dirForAge = (
-    age: number,
+  const dirForLevel = (
+    level: number,
     s: LabelSide,
     baseYear: number,
     inwardYear: number
   ): Point2D => {
-    const pA = projectIso(frame.point(baseYear, age, 0), projection);
-    const pB = projectIso(frame.point(inwardYear, age, 0), projection);
+    const pA = projectIso(frame.point(baseYear, 0, level), projection);
+    const pB = projectIso(frame.point(inwardYear, 0, level), projection);
     const dx = pA.x - pB.x;
     const dy = pA.y - pB.y;
     const mag = Math.hypot(dx, dy) || 1;
     return { x: dx / mag, y: dy / mag };
   };
 
+  const formatLevel = (level: number): string =>
+    level.toLocaleString("en-US");
+
   return (
     <g>
       {sides.map((s) => {
-        const baseYear = labelYearFor(s);
+        const baseYear = baseYearFor(s);
         const inwardYear = inwardYearFor(s, baseYear);
-        return LABEL_AGES.map((age) => {
-          const text = LABEL_TEXT[age] ?? `${age}`;
-          const anchor = projectIso(frame.point(baseYear, age, 0), projection);
-          const dir = dirForAge(age, s, baseYear, inwardYear);
+        return levelsForSide(s).map((level) => {
+          const anchor = projectIso(
+            frame.point(baseYear, 0, level),
+            projection
+          );
+          const dir = dirForLevel(level, s, baseYear, inwardYear);
           const textPos = {
             x: anchor.x + dir.x * (tickLen + textOffset),
             y: anchor.y + dir.y * (tickLen + textOffset),
           };
 
           return (
-            <g key={`age-label-${s}-${age}`}>
+            <g key={`value-label-${s}-${level}`}>
               <text
                 x={textPos.x}
                 y={textPos.y}
@@ -97,7 +91,7 @@ export default function AgeLabels({
                 fontSize={style.fontSize}
                 fontWeight={style.fontWeight}
               >
-                {text}
+                {formatLevel(level)}
               </text>
             </g>
           );
