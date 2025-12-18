@@ -20,6 +20,11 @@ import {
   lambert,
   inkAlphaFromBrightness,
 } from "./shading";
+import TitleBlock, {
+  TITLE_BLOCK_WIDTH,
+  TITLE_BLOCK_HEIGHT,
+} from "./layers/TitleBlock";
+import AgeLabels from "./layers/AgeLabels";
 
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
@@ -28,7 +33,7 @@ import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import contourRaw from "../data/porozzo-contours.json";
 import RightWall from "./layers/RightWall";
 import FloorAgeLines from "./layers/FloorAgeLines";
-import BackWall from "./layers/BackWall";
+import BackWallIsolines from "./layers/BackWallIsolines";
 import { makeFrame3D } from "../core/frame3d";
 
 type ContourPointFile = { year: number; age: number };
@@ -45,8 +50,9 @@ const EXTEND_RIGHT_YEARS = 20;
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
 const LINE_THIN_WIDTH = 0.5;
+const LINE_THIN_OPACITY = 0.3;
+
 const LINE_THICK_WIDTH = 1;
-const LINE_THIN_OPACITY = 0.5;
 const LINE_THICK_OPACITY = 0.9;
 
 const vizStyle = {
@@ -469,6 +475,11 @@ export default function AppPlayground() {
   const floorFrameString = floorFramePoints
     .map((p) => `${p.x},${p.y}`)
     .join(" ");
+  const backWallTopLeft = backWallFramePoints[3];
+  const titlePos = {
+    x: backWallTopLeft.x - TITLE_BLOCK_WIDTH * 0.5,
+    y: backWallTopLeft.y - TITLE_BLOCK_HEIGHT - 12,
+  };
 
 
   // project main surface + floor
@@ -522,8 +533,7 @@ export default function AppPlayground() {
         boxSizing: "border-box",
       }}
     >
-      <h1>Perozzo Playground</h1>
-      <p>Sweden survivorship surface with Perozzo-style meshes.</p>
+
       <svg
         width={WIDTH}
         height={HEIGHT}
@@ -534,47 +544,19 @@ export default function AppPlayground() {
       >
         <g transform={`translate(${offsetX}, ${offsetY})`}>
 
-          <polyline
-            points={floorFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke={vizStyle.ages.stroke}
-            strokeWidth={vizStyle.ages.thinWidth}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          <polyline
-            points={backWallFramePoints.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke={vizStyle.ages.stroke}
-            strokeWidth={vizStyle.ages.thinWidth}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-          <BackWall
-            surfacePoints={surfacePoints}
-            rows={rows}
-            cols={cols}
-            projection={projection}
-            floorZ={FLOOR_DEPTH}
-            years={years}
-            ages={ages}
-            maxSurvivors={maxSurvivors}
-            extendLeftYears={EXTEND_LEFT_YEARS}
-            extendRightYears={EXTEND_RIGHT_YEARS}
-            majorStep={50_000}
+          <BackWallIsolines
             frame={frame}
+            projection={projection}
             minYearExt={minYearExt}
             maxYearExt={maxYearExt}
-            maxValueForFrame={FRAME_MAX_VALUE}
-            shading={shadingConfig}
+            levels={[0, 50_000, 100_000, 150_000, 200_000, 250_000, 300_000]}
             style={{
               stroke: vizStyle.values.stroke,
               thinWidth: vizStyle.values.thinWidth,
               thickWidth: vizStyle.values.thickWidth,
-              heavyStep: vizStyle.values.heavyStep,
-              surfaceFill: vizStyle.surface.fill,
               thinOpacity: vizStyle.values.thinOpacity,
               thickOpacity: vizStyle.values.thickOpacity,
+              heavyStep: vizStyle.values.heavyStep,
             }}
           />
           {/* shaded floor plane */}
@@ -600,6 +582,17 @@ export default function AppPlayground() {
             style={{
               stroke: vizStyle.ages.stroke,
               strokeWidth: vizStyle.ages.thickWidth,
+            }}
+          />
+          <AgeLabels
+            frame={frame}
+            projection={projection}
+            minYearExt={minYearExt}
+            style={{
+              stroke: vizStyle.ages.stroke,
+              fontFamily: "serif",
+              fontSize: 12,
+              opacity: vizStyle.ages.thickOpacity,
             }}
           />
           <RightWall
@@ -793,6 +786,20 @@ export default function AppPlayground() {
               opacity={vizStyle.debugPoints.opacity}
             />
           ))}
+
+          <TitleBlock
+            x={titlePos.x + 125}
+            y={titlePos.y + 130}
+            style={{ text: "#282828ff" }}
+            legend={{
+              ages: vizStyle.ages.stroke,
+              values: vizStyle.values.stroke,
+              cohorts: vizStyle.cohorts.stroke,
+              years: vizStyle.years.stroke,
+              thin: LINE_THIN_WIDTH,
+              thick: LINE_THICK_WIDTH,
+            }}
+          />
         </g>
       </svg>
     </div>
