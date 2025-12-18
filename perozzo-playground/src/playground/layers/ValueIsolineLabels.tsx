@@ -1,7 +1,7 @@
 import { projectIso, type ProjectionOptions } from "../../core/geometry";
 import type { Frame3D } from "../../core/frame3d";
 import type { Point2D } from "../../core/types";
-import type { AxisLabelStyle } from "./AgeLabels";
+import type { AxisLabelStyle } from "../vizConfig";
 
 type LabelSide = "left" | "right";
 

@@ -19,6 +19,7 @@ const block = {
   gap: 5,
   fontFamily: "Garamond, serif",
   fontWeight: "normal",
+  sizeTiny: 8,
   sizeSmall: 10,
   sizeLarge: 21,
   lines: [
@@ -82,7 +83,7 @@ export default function TitleBlock({
         <text
           x={block.width / 2}
           y={block.lines.length * block.gap + block.sizeLarge + block.gap * 2}
-          fontSize={block.sizeSmall}
+          fontSize={block.sizeTiny} fontWeight={"bold"}
         >
           {block.years}
         </text>
@@ -118,8 +119,8 @@ export default function TitleBlock({
             />
             <text
               x={itemWidth / 2}
-              y={18}
-              fontSize={block.sizeSmall}
+              y={15}
+              fontSize={block.sizeTiny}
               fill={style.text}
             >
               {item.label}

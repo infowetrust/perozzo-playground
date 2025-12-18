@@ -1,14 +1,7 @@
 import { projectIso, type ProjectionOptions } from "../../core/geometry";
 import type { Frame3D } from "../../core/frame3d";
 import type { Point2D } from "../../core/types";
-
-export type AxisLabelStyle = {
-  color: string;
-  fontFamily: string;
-  fontSize: number;
-  fontWeight: number;
-  opacity: number;
-};
+import type { AxisLabelStyle } from "../vizConfig";
 
 type LabelSide = "left" | "right";
 

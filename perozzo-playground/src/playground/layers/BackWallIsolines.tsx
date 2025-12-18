@@ -1,14 +1,7 @@
 import { projectIso, type ProjectionOptions } from "../../core/geometry";
 import type { Frame3D } from "../../core/frame3d";
-
-type BackWallIsoStyle = {
-  stroke: string;
-  thinWidth: number;
-  thickWidth: number;
-  thinOpacity: number;
-  thickOpacity: number;
-  heavyStep: number;
-};
+import type { LineStyle } from "../vizConfig";
+import { isHeavy } from "../vizConfig";
 
 type BackWallIsolinesProps = {
   frame: Frame3D;
@@ -16,7 +9,7 @@ type BackWallIsolinesProps = {
   minYearExt: number;
   maxYearExt: number;
   levels: number[];
-  style: BackWallIsoStyle;
+  style: LineStyle;
 };
 
 export default function BackWallIsolines({
@@ -40,8 +33,7 @@ export default function BackWallIsolines({
 
         if (pts.length < 2) return null;
 
-        const heavy =
-          style.heavyStep > 0 ? level % style.heavyStep === 0 : level === 0;
+        const heavy = style.heavyStep > 0 ? isHeavy(level, style.heavyStep) : level === 0;
 
         return (
           <polyline
