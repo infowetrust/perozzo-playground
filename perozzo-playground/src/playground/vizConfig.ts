@@ -21,6 +21,9 @@ export type LineStyle = {
   heavyStep: number;
 };
 
+export const HOVER_HIGHLIGHT_MULT = 2.5;
+export const HOVER_DIM_MULT = 0.75;
+
 export function isHeavy(value: number, heavyStep: number): boolean {
   if (!heavyStep) return false;
   return value % heavyStep === 0;

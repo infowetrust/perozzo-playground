@@ -30,6 +30,7 @@ import InteractionLayer from "./layers/InteractionLayer";
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import { makeFrame3D } from "../core/frame3d";
+import { HOVER_HIGHLIGHT_MULT, HOVER_DIM_MULT } from "./vizConfig";
 
 type ContourPointFile = { year: number; age: number };
 type ContourFile = { level: number; points: ContourPointFile[] };
@@ -744,16 +745,16 @@ export default function PlateViz({
         Math.max(hover.screenY - 14, 0),
         HEIGHT - TOOLTIP_HEIGHT
       ),
-        survivors:
-          maxZ > 0
-            ? Math.max(
-                0,
-                Math.round(
-                  ((model.surfacePoints[hover.i]?.z ?? 0) / maxZ) *
-                    model.maxSurvivors
-                )
-              )
-            : 0,
+      survivors:
+        maxZ > 0
+          ? Math.max(
+            0,
+            Math.round(
+              ((model.surfacePoints[hover.i]?.z ?? 0) / maxZ) *
+              model.maxSurvivors
+            )
+          )
+          : 0,
     }
     : null;
   const tooltipTextStyle = {
@@ -762,6 +763,13 @@ export default function PlateViz({
     fontWeight: TOOLTIP_STYLE.fontWeight,
     opacity: TOOLTIP_STYLE.opacity,
   };
+  const focusYear = hover?.year ?? null;
+  const focusAge = hover?.age ?? null;
+  const focusBirthYear = hover ? hover.year - hover.age : null;
+  const hoverFocus =
+    focusYear !== null && focusAge !== null && focusBirthYear !== null
+      ? { year: focusYear, age: focusAge, birthYear: focusBirthYear }
+      : null;
   const ageStart = hover ? Math.max(0, hover.age - 4) : 0;
   const ageLineText =
     hover && hover.age === 0
@@ -918,6 +926,11 @@ export default function PlateViz({
                 contourPolylines2D={model.contourPolylines2D}
                 vizStyle={linesVizStyle}
                 projectedSurface={model.projectedSurface}
+                focus={hoverFocus}
+                hoverOpacity={{
+                  highlightMult: HOVER_HIGHLIGHT_MULT,
+                  dimMult: HOVER_DIM_MULT,
+                }}
                 showCohortLines={layersEnabled.cohortLines}
               />
             )}
