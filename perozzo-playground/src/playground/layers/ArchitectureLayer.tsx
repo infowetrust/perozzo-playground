@@ -47,6 +47,8 @@ type ArchitectureLayerProps = {
   floorAlpha: number;
   shadingInkColor: string;
   backWallStyle: LineStyle;
+  backwallFullLevels: number[];
+  backwallRightLevels: number[];
   floorStyle: FloorStyle;
   floorAgeStyle: FloorAgeStyle;
   rightWallStyle: RightWallStyle;
@@ -58,6 +60,7 @@ type ArchitectureLayerProps = {
   maxSurvivors: number;
   floorZ: number;
   valueStep: number;
+  valueMinorStep: number;
 };
 
 export default function ArchitectureLayer({
@@ -71,6 +74,8 @@ export default function ArchitectureLayer({
   floorAlpha,
   shadingInkColor,
   backWallStyle,
+  backwallFullLevels,
+  backwallRightLevels,
   floorStyle,
   floorAgeStyle,
   rightWallStyle,
@@ -82,6 +87,7 @@ export default function ArchitectureLayer({
   maxSurvivors,
   floorZ,
   valueStep,
+  valueMinorStep,
 }: ArchitectureLayerProps) {
   return (
     <g id="layer-architecture">
@@ -90,7 +96,8 @@ export default function ArchitectureLayer({
         projection={projection}
         minYearExt={minYearExt}
         maxYearExt={maxYearExt}
-        levels={[0, 50_000, 100_000, 150_000, 200_000, 250_000]}
+        fullLevels={backwallFullLevels}
+        rightOnlyLevels={backwallRightLevels}
         style={backWallStyle}
       />
       <polygon
@@ -123,6 +130,7 @@ export default function ArchitectureLayer({
         ages={ages}
         maxSurvivors={maxSurvivors}
         valueStep={valueStep}
+        valueMinorStep={valueMinorStep}
         frame={frame}
         shading={shadingConfig}
         style={rightWallStyle}

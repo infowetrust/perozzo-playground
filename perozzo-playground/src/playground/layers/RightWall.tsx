@@ -28,6 +28,8 @@ type WallStyle = {
   surfaceStrokeWidth?: number;
 };
 
+let loggedRightWallStyle = false;
+
 type RightWallProps = {
   surfacePoints: Point3D[];
   rows: number;
@@ -37,6 +39,7 @@ type RightWallProps = {
   ages: number[];
   maxSurvivors: number;
   valueStep: number;
+  valueMinorStep: number;
   frame: Frame3D;
   shading?: {
     enabled: boolean;
@@ -67,6 +70,7 @@ export default function RightWall({
   ages,
   maxSurvivors,
   valueStep,
+  valueMinorStep,
   frame,
   shading,
   style,
@@ -77,6 +81,19 @@ export default function RightWall({
 
   void valueStep;
 
+  if (!loggedRightWallStyle) {
+    console.log(
+      "[RIGHTWALL DEBUG]",
+      "surfaceFill=",
+      style.surfaceFill,
+      "wallFill=",
+      style.wallFill,
+      "valueStroke=",
+      style.valueStroke
+    );
+    loggedRightWallStyle = true;
+  }
+
   const colMax = cols - 1;
   const yearMax = frame.maxYear;
   const ageStart = ages[0] ?? 0;
@@ -86,44 +103,43 @@ export default function RightWall({
   const wallNormal =
     shadingConfig && lightVec
       ? quadNormal(
-          frame.point(yearMax, ageStart, 0),
-          frame.point(yearMax, ageEnd, 0),
-          frame.point(yearMax, ageStart, maxSurvivors)
-        )
+        frame.point(yearMax, ageStart, 0),
+        frame.point(yearMax, ageEnd, 0),
+        frame.point(yearMax, ageStart, maxSurvivors)
+      )
       : null;
   const wallAlpha =
     shadingConfig && lightVec && wallNormal
       ? inkAlphaFromBrightness({
-          brightness: lambert(
-            wallNormal,
-            lightVec,
-            shadingConfig.ambient,
-            shadingConfig.diffuse
-          ),
-          ambient: shadingConfig.ambient,
-          diffuse: shadingConfig.diffuse,
-          steps: shadingConfig.steps,
-          inkAlphaMax: shadingConfig.inkAlphaMax,
-          gamma: shadingConfig.gamma,
-          shadowBias: shadingConfig.shadowBias,
-          alphaScale: shadingConfig.alphaScale?.rightWall ?? 1,
-        })
+        brightness: lambert(
+          wallNormal,
+          lightVec,
+          shadingConfig.ambient,
+          shadingConfig.diffuse
+        ),
+        ambient: shadingConfig.ambient,
+        diffuse: shadingConfig.diffuse,
+        steps: shadingConfig.steps,
+        inkAlphaMax: shadingConfig.inkAlphaMax,
+        gamma: shadingConfig.gamma,
+        shadowBias: shadingConfig.shadowBias,
+        alphaScale: shadingConfig.alphaScale?.rightWall ?? 1,
+      })
       : 0;
-  const zSpan = frame.maxZ - frame.floorZ || 1;
   const clipPathId = "rightWallClip";
 
   const wallTop: Point2D[] = [];
   const wallFloor: Point2D[] = [];
   for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-    const age = ages[rowIndex] ?? ages[0] ?? 0;
     const topPoint3D = surfacePoints[rowIndex * cols + colMax];
-    const zNorm = topPoint3D?.z ?? frame.floorZ;
-    const value =
-      frame.maxSurvivors > 0
-        ? ((zNorm - frame.floorZ) / zSpan) * frame.maxSurvivors
-        : 0;
-    wallTop.push(projectIso(frame.point(yearMax, age, value), projection));
-    wallFloor.push(projectIso(frame.point(yearMax, age, 0), projection));
+    if (!topPoint3D) continue;
+    wallTop.push(projectIso(topPoint3D, projection));
+    const floorPoint3D = {
+      x: topPoint3D.x,
+      y: topPoint3D.y,
+      z: floorZ,
+    };
+    wallFloor.push(projectIso(floorPoint3D, projection));
   }
 
   const wallBottom = [...wallFloor].reverse();
@@ -146,7 +162,15 @@ export default function RightWall({
     };
   });
 
-  const minorStep = 10_000;
+  const edgeStart3D = surfacePoints[0 * cols + colMax];
+  const edgeEnd3D = surfacePoints[(rows - 1) * cols + colMax];
+  const zSpan = frame.maxZ - floorZ || 1;
+  const zForValue = (level: number) =>
+    frame.maxSurvivors > 0
+      ? floorZ + (level / frame.maxSurvivors) * zSpan
+      : floorZ;
+
+  const minorStep = Math.max(1, valueMinorStep);
   const valueLines: {
     key: string;
     start: Point2D;
@@ -154,8 +178,16 @@ export default function RightWall({
     heavy: boolean;
   }[] = [];
   for (let level = 0; level <= maxSurvivors; level += minorStep) {
-    const start = projectIso(frame.point(yearMax, ageStart, level), projection);
-    const end = projectIso(frame.point(yearMax, ageEnd, level), projection);
+    if (!edgeStart3D || !edgeEnd3D) continue;
+    const z = zForValue(level);
+    const start = projectIso(
+      { x: edgeStart3D.x, y: edgeStart3D.y, z },
+      projection
+    );
+    const end = projectIso(
+      { x: edgeEnd3D.x, y: edgeEnd3D.y, z },
+      projection
+    );
     valueLines.push({
       key: `val-${level}`,
       start,
@@ -173,28 +205,47 @@ export default function RightWall({
     valueLines[valueLines.length - 1]?.key !== `val-${maxSurvivors}`
   ) {
     const level = maxSurvivors;
-    const start = projectIso(frame.point(yearMax, ageStart, level), projection);
-    const end = projectIso(frame.point(yearMax, ageEnd, level), projection);
-    valueLines.push({
-      key: `val-${level}`,
-      start,
-      end,
-      heavy:
-        style.valueHeavyStep > 0
-          ? level % style.valueHeavyStep === 0
-          : level === 0,
-    });
+    if (!edgeStart3D || !edgeEnd3D) {
+      // skip adding the maxSurvivors line if we can't compute edge points
+    } else {
+      const z = zForValue(level);
+      const start = projectIso(
+        { x: edgeStart3D.x, y: edgeStart3D.y, z },
+        projection
+      );
+      const end = projectIso(
+        { x: edgeEnd3D.x, y: edgeEnd3D.y, z },
+        projection
+      );
+      valueLines.push({
+        key: `val-${level}`,
+        start,
+        end,
+        heavy:
+          style.valueHeavyStep > 0
+            ? level % style.valueHeavyStep === 0
+            : level === 0,
+      });
+    }
   }
 
   if (valueLines.length === 0) {
-    const start = projectIso(frame.point(yearMax, ageStart, 0), projection);
-    const end = projectIso(frame.point(yearMax, ageEnd, 0), projection);
-    valueLines.push({
-      key: "val-0",
-      start,
-      end,
-      heavy: true,
-    });
+    if (edgeStart3D && edgeEnd3D) {
+      const start = projectIso(
+        { x: edgeStart3D.x, y: edgeStart3D.y, z: floorZ },
+        projection
+      );
+      const end = projectIso(
+        { x: edgeEnd3D.x, y: edgeEnd3D.y, z: floorZ },
+        projection
+      );
+      valueLines.push({
+        key: "val-0",
+        start,
+        end,
+        heavy: true,
+      });
+    }
   }
 
   return (
@@ -208,7 +259,7 @@ export default function RightWall({
       <polygon
         points={polygonString}
         fill={style.surfaceFill}
-        stroke={style.surfaceStroke ?? style.wallStroke}
+        stroke={style.wallStroke}
         strokeWidth={style.surfaceStrokeWidth}
       />
       {wallAlpha > 0 && shadingConfig && (
@@ -249,7 +300,7 @@ export default function RightWall({
             strokeOpacity={
               line.heavy ? style.valueThickOpacity : style.valueThinOpacity
             }
-            strokeLinecap="round"
+            strokeLinecap="square"
           />
         ))}
       </g>

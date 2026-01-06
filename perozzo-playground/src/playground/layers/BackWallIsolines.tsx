@@ -8,7 +8,8 @@ type BackWallIsolinesProps = {
   projection: ProjectionOptions;
   minYearExt: number;
   maxYearExt: number;
-  levels: number[];
+  fullLevels: number[];
+  rightOnlyLevels: number[];
   style: LineStyle;
 };
 
@@ -17,37 +18,41 @@ export default function BackWallIsolines({
   projection,
   minYearExt,
   maxYearExt,
-  levels,
+  fullLevels,
+  rightOnlyLevels,
   style,
 }: BackWallIsolinesProps) {
   const { yearStep } = frame;
 
   return (
     <>
-      {levels.map((level) => {
-        const pts = [];
-        const startYear = level >= 200_000 ? frame.maxYear : minYearExt;
-        for (let year = startYear; year <= maxYearExt; year += yearStep) {
-          pts.push(projectIso(frame.point(year, 0, level), projection));
-        }
+      {[{ levels: fullLevels, start: minYearExt }, { levels: rightOnlyLevels, start: frame.maxYear }].map(
+        ({ levels, start }) =>
+          levels.map((level) => {
+            const pts = [];
+            for (let year = start; year <= maxYearExt; year += yearStep) {
+              pts.push(projectIso(frame.point(year, 0, level), projection));
+            }
 
-        if (pts.length < 2) return null;
+            if (pts.length < 2) return null;
 
-        const heavy = style.heavyStep > 0 ? isHeavy(level, style.heavyStep) : level === 0;
+            const heavy =
+              style.heavyStep > 0 ? isHeavy(level, style.heavyStep) : level === 0;
 
-        return (
-          <polyline
-            key={`backwall-iso-${level}`}
-            points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke={style.stroke}
-            strokeWidth={heavy ? style.thickWidth : style.thinWidth}
-            strokeOpacity={heavy ? style.thickOpacity : style.thinOpacity}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        );
-      })}
+            return (
+              <polyline
+                key={`backwall-iso-${start}-${level}`}
+                points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={style.stroke}
+                strokeWidth={heavy ? style.thickWidth : style.thinWidth}
+                strokeOpacity={heavy ? style.thickOpacity : style.thinOpacity}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            );
+          })
+      )}
     </>
   );
 }

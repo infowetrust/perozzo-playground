@@ -23,6 +23,11 @@ type LabelsLayerProps = {
     values: { stroke: string };
     years: { stroke: string };
   };
+  valueLevels: {
+    left: number[];
+    right: number[];
+  };
+  showTitle?: boolean;
   titleProps: {
     x: number;
     y: number;
@@ -34,6 +39,10 @@ type LabelsLayerProps = {
       years: string;
       thin: number;
       thick: number;
+    };
+    title?: {
+      bigWord?: string;
+      years?: string;
     };
   };
   topValueByYear: Record<number, number>;
@@ -48,6 +57,8 @@ export default function LabelsLayer({
   axisLabelBaseStyle,
   axisLabelLayout,
   vizStyle,
+  valueLevels,
+  showTitle = true,
   titleProps,
   topValueByYear,
 }: LabelsLayerProps) {
@@ -84,6 +95,8 @@ export default function LabelsLayer({
         tickLen={axisLabelLayout.tickLen}
         textOffset={axisLabelLayout.textOffset}
         style={valueLabelStyle}
+        leftLevels={valueLevels.left}
+        rightLevels={valueLevels.right}
       />
       <YearLabels
         frame={frame}
@@ -98,7 +111,7 @@ export default function LabelsLayer({
         bottomAngleDeg={-50}
         topValueByYear={topValueByYear}
       />
-      <TitleBlock {...titleProps} />
+      {showTitle !== false && <TitleBlock {...titleProps} />}
     </g>
   );
 }

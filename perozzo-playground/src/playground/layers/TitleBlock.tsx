@@ -12,6 +12,10 @@ type TitleBlockProps = {
     thin: number;
     thick: number;
   };
+  title?: {
+    bigWord?: string;
+    years?: string;
+  };
 };
 
 const block = {
@@ -41,7 +45,10 @@ export default function TitleBlock({
   y,
   style,
   legend,
+  title,
 }: TitleBlockProps) {
+  const bigWord = title?.bigWord ?? block.bigWord;
+  const years = title?.years ?? block.years;
   const legendItems = [
     { label: "Census", color: legend.years },
     { label: "Age", color: legend.ages },
@@ -78,14 +85,14 @@ export default function TitleBlock({
           fontSize={block.sizeLarge}
           letterSpacing={2}
         >
-          {block.bigWord}
+          {bigWord}
         </text>
         <text
           x={block.width / 2}
           y={block.lines.length * block.gap + block.sizeLarge + block.gap * 2}
           fontSize={block.sizeTiny} fontWeight={"bold"}
         >
-          {block.years}
+          {years}
         </text>
       </g>
 

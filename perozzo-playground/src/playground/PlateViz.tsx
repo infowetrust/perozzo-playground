@@ -27,6 +27,11 @@ import SurfaceLayer from "./layers/SurfaceLayer";
 import DataLinesLayer from "./layers/DataLinesLayer";
 import LabelsLayer from "./layers/LabelsLayer";
 import InteractionLayer from "./layers/InteractionLayer";
+import {
+  buildDepthBuffer,
+  type DepthBuffer,
+  type OcclusionConfig,
+} from "./occlusion";
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import { makeFrame3D } from "../core/frame3d";
@@ -41,15 +46,35 @@ type PlateVizProps = {
   contours: ContourFile[] | any;
   preset?: ProjectionPreset;
   showUI?: boolean;
+  canvas?: { width: number; height: number };
+  frameMax?: { age: number; value: number };
+  title?: { bigWord: string; years: string };
+  valueLevels?: {
+    left: number[];
+    right: number[];
+    backwallFull: number[];
+    backwallRightOnly: number[];
+  };
+  showTitle?: boolean;
+  valuesHeavyStep?: number;
+  rightWallValueStep?: number;
+  rightWallMinorStep?: number;
+  activeKey?: string;
 };
 
-const WIDTH = 700;
-const HEIGHT = 700;
+const DEFAULT_WIDTH = 700;
+const DEFAULT_HEIGHT = 700;
 const FLOOR_DEPTH = 0;
 const EXTEND_LEFT_YEARS = 20;
 const EXTEND_RIGHT_YEARS = 10;
-const FRAME_MAX_AGE = 110;
-const FRAME_MAX_VALUE = 325_000;
+const DEFAULT_FRAME_MAX_AGE = 110;
+const DEFAULT_FRAME_MAX_VALUE = 325_000;
+const DEFAULT_VALUE_LEVELS = {
+  left: [50_000, 100_000, 150_000],
+  right: [50_000, 100_000, 150_000, 200_000, 250_000],
+  backwallFull: [0, 50_000, 100_000, 150_000],
+  backwallRightOnly: [200_000, 250_000],
+};
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
@@ -184,6 +209,23 @@ const vizStyle = {
   },
 };
 
+const KISS_DEBUG_ENABLED = true;
+const KISS_DEBUG_LEVELS = [
+  5_000_000,
+  10_000_000,
+  15_000_000,
+  20_000_000,
+];
+
+const OCCLUSION: OcclusionConfig = {
+  enabled: false,
+  gridW: 320,
+  gridH: 320,
+  epsilon: 0.02,
+  mode: "dim",
+  dimFactor: 0.35,
+};
+
 const TOOLTIP_WIDTH = 120;
 const TOOLTIP_HEIGHT = 96;
 const TOOLTIP_STYLE = {
@@ -203,10 +245,32 @@ type Quad2D = {
   corners3D: Point3D[];
 };
 
-type YearLine = { year: number; points: Point2D[]; heavy: boolean };
-type AgeLine = { age: number; points: Point2D[]; heavy: boolean };
-type CohortLine = { birthYear: number; points: Point2D[]; heavy: boolean };
+type YearLine = {
+  year: number;
+  points: Point2D[];
+  indices: number[];
+  heavy: boolean;
+};
+type AgeLine = {
+  age: number;
+  points: Point2D[];
+  indices: number[];
+  heavy: boolean;
+};
+type CohortLine = {
+  birthYear: number;
+  points: Point2D[];
+  indices: number[];
+  heavy: boolean;
+};
 type ValueContour2D = { level: number; points: Point2D[] };
+type KissPair = {
+  level: number;
+  age: number;
+  surface: Point2D;
+  wall: Point2D;
+  dist: number;
+};
 
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
 
@@ -262,6 +326,26 @@ function distToSilhouette(p: Point2D, poly: Point2D[]): number {
   return minDist;
 }
 
+function findRowSegmentIndex(age: number, ages: number[]): number {
+  if (age < ages[0] || age > ages[ages.length - 1]) return -1;
+  for (let i = 0; i < ages.length - 1; i++) {
+    if (age >= ages[i] && age <= ages[i + 1]) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function findColSegmentIndex(year: number, years: number[]): number {
+  if (year < years[0] || year > years[years.length - 1]) return -1;
+  for (let i = 0; i < years.length - 1; i++) {
+    if (year >= years[i] && year <= years[i + 1]) {
+      return i;
+    }
+  }
+  return -1;
+}
+
 function buildQuads(
   surfacePoints: Point3D[],
   rows: number,
@@ -312,11 +396,14 @@ function buildYearLines(
 ): YearLine[] {
   return years.map((year, colIndex) => {
     const pts: Point2D[] = [];
+    const indices: number[] = [];
     for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+      const idx = rowIndex * cols + colIndex;
+      pts.push(projectedSurface[idx]);
+      indices.push(idx);
     }
     const heavy = (year - years[0]) % vizStyle.years.heavyStep === 0;
-    return { year, points: pts, heavy };
+    return { year, points: pts, indices, heavy };
   });
 }
 
@@ -328,11 +415,14 @@ function buildAgeLines(
 ): AgeLine[] {
   return ages.map((age, rowIndex) => {
     const pts: Point2D[] = [];
+    const indices: number[] = [];
     for (let colIndex = 0; colIndex < cols; colIndex++) {
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+      const idx = rowIndex * cols + colIndex;
+      pts.push(projectedSurface[idx]);
+      indices.push(idx);
     }
     const heavy = (age - ages[0]) % vizStyle.ages.heavyStep === 0;
-    return { age, points: pts, heavy };
+    return { age, points: pts, indices, heavy };
   });
 }
 
@@ -354,6 +444,7 @@ function buildCohortLines(
 
   for (const birthYear of cohortBirthYears) {
     const pts: Point2D[] = [];
+    const indices: number[] = [];
 
     for (const year of years) {
       const age = year - birthYear;
@@ -364,13 +455,15 @@ function buildCohortLines(
       const colIndex = years.indexOf(year);
       if (rowIndex === -1 || colIndex === -1) continue;
 
-      pts.push(projectedSurface[rowIndex * cols + colIndex]);
+      const idx = rowIndex * cols + colIndex;
+      pts.push(projectedSurface[idx]);
+      indices.push(idx);
     }
 
     if (pts.length > 1) {
       const heavy =
         (birthYear - minYear) % vizStyle.cohorts.heavyStep === 0;
-      cohortLines.push({ birthYear, points: pts, heavy });
+      cohortLines.push({ birthYear, points: pts, indices, heavy });
     }
   }
 
@@ -380,49 +473,75 @@ function buildCohortLines(
 function buildValueContours2D(
   contours: ContourFile[],
   projectedSurface: Point2D[],
+  surfacePoints: Point3D[],
   ages: number[],
   years: number[],
   _rows: number,
-  cols: number
+  cols: number,
+  zScale: number
 ): ValueContour2D[] {
-  function findRowBelow(age: number): number {
-    if (age < ages[0] || age > ages[ages.length - 1]) return -1;
-    for (let i = 0; i < ages.length - 1; i++) {
-      if (age >= ages[i] && age <= ages[i + 1]) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  function findColLeft(year: number): number {
-    if (year < years[0] || year > years[years.length - 1]) return -1;
-    for (let i = 0; i < years.length - 1; i++) {
-      if (year >= years[i] && year <= years[i + 1]) return i;
-    }
-    return -1;
-  }
-
   return contours.map((iso) => {
     const pts: Point2D[] = [];
 
     const contourPts = iso.points;
 
+    const maxYearValue = years[years.length - 1];
+    const EPS = 1e-6;
+
+    const crossingAgesAtCol = (level: number, col: number): number[] => {
+      if (zScale === 0) return [];
+      const out: number[] = [];
+      for (let row = 0; row < ages.length - 1; row++) {
+        const idx0 = row * cols + col;
+        const idx1 = (row + 1) * cols + col;
+        const p0 = surfacePoints[idx0];
+        const p1 = surfacePoints[idx1];
+        if (!p0 || !p1) continue;
+        const value0 = p0.z / zScale;
+        const value1 = p1.z / zScale;
+        if (value0 === value1) continue;
+        const lo = Math.min(value0, value1);
+        const hi = Math.max(value0, value1);
+        if (level < lo - EPS || level > hi + EPS) continue;
+        const t = (level - value0) / (value1 - value0);
+        if (t < -EPS || t > 1 + EPS) continue;
+        const age = ages[row] + t * (ages[row + 1] - ages[row]);
+        out.push(age);
+      }
+      return out;
+    };
+
     for (const pt of contourPts) {
-      const colLeft = findColLeft(pt.year);
+      let adjustedAge = pt.age;
+      const clampedYear =
+        pt.year > maxYearValue && pt.year - maxYearValue < EPS
+          ? maxYearValue
+          : pt.year;
+      if (Math.abs(clampedYear - maxYearValue) < EPS) {
+        const crossings = crossingAgesAtCol(iso.level, cols - 1);
+        if (crossings.length > 0) {
+          const nearest = crossings.reduce((best, age) =>
+            Math.abs(age - adjustedAge) < Math.abs(best - adjustedAge)
+              ? age
+              : best
+          );
+          adjustedAge = nearest;
+        }
+      }
+      const colLeft = findColSegmentIndex(clampedYear, years);
       if (colLeft < 0) continue;
 
       const colRight = Math.min(colLeft + 1, cols - 1);
       const y0 = years[colLeft];
       const y1 = years[colRight];
-      const ty = y1 === y0 ? 0 : (pt.year - y0) / (y1 - y0);
+      const ty = y1 === y0 ? 0 : (clampedYear - y0) / (y1 - y0);
 
-      const rowBelow = findRowBelow(pt.age);
+      const rowBelow = findRowSegmentIndex(adjustedAge, ages);
       if (rowBelow < 0 || rowBelow >= _rows - 1) continue;
 
       const age0 = ages[rowBelow];
       const age1 = ages[rowBelow + 1];
-      const ta = (pt.age - age0) / (age1 - age0);
+      const ta = (adjustedAge - age0) / (age1 - age0);
 
       const p00 = projectedSurface[rowBelow * cols + colLeft];
       const p10 = projectedSurface[rowBelow * cols + colRight];
@@ -447,6 +566,56 @@ function buildValueContours2D(
       points: pts,
     };
   });
+}
+
+function projectSurfaceYearAge(
+  year: number,
+  age: number,
+  projectedSurface: Point2D[],
+  ages: number[],
+  years: number[],
+  rows: number,
+  cols: number
+): Point2D | null {
+  if (
+    projectedSurface.length === 0 ||
+    year < years[0] ||
+    year > years[years.length - 1] ||
+    age < ages[0] ||
+    age > ages[ages.length - 1]
+  ) {
+    return null;
+  }
+
+  const colLeft = findColSegmentIndex(year, years);
+  const rowBelow = findRowSegmentIndex(age, ages);
+  if (colLeft < 0 || rowBelow < 0 || rowBelow >= rows - 1) return null;
+
+  const colRight = Math.min(colLeft + 1, cols - 1);
+  const rowAbove = Math.min(rowBelow + 1, rows - 1);
+
+  const y0 = years[colLeft];
+  const y1 = years[colRight];
+  const ty = y1 === y0 ? 0 : (year - y0) / (y1 - y0);
+
+  const age0 = ages[rowBelow];
+  const age1 = ages[rowAbove];
+  const ta = age1 === age0 ? 0 : (age - age0) / (age1 - age0);
+
+  const p00 = projectedSurface[rowBelow * cols + colLeft];
+  const p10 = projectedSurface[rowBelow * cols + colRight];
+  const p01 = projectedSurface[rowAbove * cols + colLeft];
+  const p11 = projectedSurface[rowAbove * cols + colRight];
+  if (!p00 || !p10 || !p01 || !p11) return null;
+
+  const q0x = p00.x + ty * (p10.x - p00.x);
+  const q0y = p00.y + ty * (p10.y - p00.y);
+  const q1x = p01.x + ty * (p11.x - p01.x);
+  const q1y = p01.y + ty * (p11.y - p01.y);
+
+  const x = q0x + ta * (q1x - q0x);
+  const y = q0y + ta * (q1y - q0y);
+  return { x, y };
 }
 
 function computeAutoCenterOffset(
@@ -488,7 +657,17 @@ export default function PlateViz({
   contours,
   preset: presetProp = "levasseur",
   showUI = true,
+  canvas,
+  frameMax,
+  title,
+  valueLevels,
+  showTitle,
+  valuesHeavyStep,
+  rightWallValueStep,
+  rightWallMinorStep,
+  activeKey,
 }: PlateVizProps) {
+  console.log("[PLATEVIZ CFG]", { valuesHeavyStep, rightWallValueStep });
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hover, setHover] = useState<null | {
     i: number;
@@ -502,12 +681,84 @@ export default function PlateViz({
     screenY: number;
   }>(null);
 
+  const datasetTitleKey = title?.bigWord?.toUpperCase() ?? "";
+  const normalizedKey = activeKey?.toLowerCase();
+  const isUsaDataset =
+    normalizedKey === "usa" ||
+    datasetTitleKey.includes("UNITED") ||
+    datasetTitleKey.includes("USA");
+
   // camera / projection based on preset
-  const swedenRows = useMemo(() => parseSwedenCsv(csvText), [csvText]);
+  const swedenRows = useMemo(() => {
+    const parsed = parseSwedenCsv(csvText);
+    if (isUsaDataset && parsed.length > 0) {
+      const years = Array.from(new Set(parsed.map((r) => r.year))).sort(
+        (a, b) => a - b
+      );
+      const ages = Array.from(new Set(parsed.map((r) => r.age))).sort(
+        (a, b) => a - b
+      );
+      const yearFirst = years[0];
+      const yearStepFirst =
+        years.length > 1 ? years[1] - years[0] : Number.NaN;
+      const yearLast = years[years.length - 1];
+      const ageStepFirst = ages.length > 1 ? ages[1] - ages[0] : Number.NaN;
+      const ageFirst = ages[0];
+      const ageLast = ages[ages.length - 1];
+      const uniqueYearSteps = new Set<number>();
+      for (let i = 1; i < years.length; i++) {
+        uniqueYearSteps.add(years[i] - years[i - 1]);
+      }
+      const uniqueAgeSteps = new Set<number>();
+      for (let i = 1; i < ages.length; i++) {
+        uniqueAgeSteps.add(ages[i] - ages[i - 1]);
+      }
+      let maxRow = parsed[0];
+      for (const row of parsed) {
+        if (row.survivors > maxRow.survivors) {
+          maxRow = row;
+        }
+      }
+      console.log(
+        `[USA DEBUG] years: start=${yearFirst}, step=${yearStepFirst}, end=${yearLast}, count=${years.length}`
+      );
+      if (uniqueYearSteps.size > 1) {
+        console.log(
+          `[USA DEBUG] unique year steps: ${Array.from(uniqueYearSteps).join(
+            ", "
+          )}`
+        );
+      }
+      console.log(
+        `[USA DEBUG] ages: start=${ageFirst}, step=${ageStepFirst}, end=${ageLast}, count=${ages.length}`
+      );
+      if (uniqueAgeSteps.size > 1) {
+        console.log(
+          `[USA DEBUG] unique age steps: ${Array.from(uniqueAgeSteps).join(
+            ", "
+          )}`
+        );
+      }
+      console.log(
+        `[USA DEBUG] max survivors: ${maxRow.survivors} at year=${maxRow.year}, age=${maxRow.age}`
+      );
+    }
+    return parsed;
+  }, [csvText, isUsaDataset]);
   const contourData = useMemo(
     () => contours as ContourFile[],
     [contours]
   );
+  const WIDTH = canvas?.width ?? DEFAULT_WIDTH;
+  const HEIGHT = canvas?.height ?? DEFAULT_HEIGHT;
+  const FRAME_MAX_AGE = frameMax?.age ?? DEFAULT_FRAME_MAX_AGE;
+  const FRAME_MAX_VALUE = frameMax?.value ?? DEFAULT_FRAME_MAX_VALUE;
+  const valueLevelConfig = valueLevels ?? DEFAULT_VALUE_LEVELS;
+  const activeValuesHeavyStep =
+    valuesHeavyStep ?? vizStyle.values.heavyStep;
+  const activeRightWallValueStep =
+    rightWallValueStep ?? activeValuesHeavyStep;
+  const activeRightWallMinorStep = rightWallMinorStep ?? 10_000;
   const topValueByYear = useMemo(() => {
     const map: Record<number, number> = {};
     for (const row of swedenRows) {
@@ -518,10 +769,9 @@ export default function PlateViz({
     return map;
   }, [swedenRows]);
 
-  const projection: ProjectionOptions = projectionForPreset(
-    presetProp,
-    WIDTH,
-    HEIGHT
+  const projection: ProjectionOptions = useMemo(
+    () => projectionForPreset(presetProp, WIDTH, HEIGHT),
+    [presetProp, WIDTH, HEIGHT]
   );
 
   const model = useMemo(() => {
@@ -560,15 +810,18 @@ export default function PlateViz({
       rows,
       cols
     );
+    const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
+    const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
     const contourPolylines2D = buildValueContours2D(
       contourData,
       projectedSurface,
+      surfacePoints,
       ages,
       years,
       rows,
-      cols
+      cols,
+      zScale
     );
-    const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
     return {
       surfacePoints,
       rows,
@@ -576,6 +829,7 @@ export default function PlateViz({
       years,
       ages,
       maxSurvivors,
+      zScale,
       frame,
       minYearExt,
       maxYearExt,
@@ -589,7 +843,7 @@ export default function PlateViz({
       contourPolylines2D,
       maxZ,
     };
-  }, [projection]);
+  }, [projection, swedenRows, contourData]);
   const layersEnabled = {
     architecture: true,
     surface: true,
@@ -598,6 +852,147 @@ export default function PlateViz({
     labels: true,
     interaction: true,
   };
+  const depthBuffer: DepthBuffer | null = useMemo(() => {
+    if (!model.projectedSurface.length || !model.surfacePoints.length) {
+      return null;
+    }
+    return buildDepthBuffer(
+      model.projectedSurface,
+      model.surfacePoints,
+      OCCLUSION.gridW,
+      OCCLUSION.gridH
+    );
+  }, [model.projectedSurface, model.surfacePoints]);
+
+  const kissDebugMarks = useMemo(() => {
+    if (!KISS_DEBUG_ENABLED) return [];
+    if (normalizedKey !== "usa") return [];
+    if (!contours || !model || !projection) return [];
+    const contourRaw = contours as ContourFile[];
+    if (!Array.isArray(contourRaw)) return [];
+    const yearMax = model.frame.maxYear;
+    const EPS = 1e-6;
+    const zSpan = model.frame.maxZ - FLOOR_DEPTH || 1;
+    const zForValue = (level: number) =>
+      model.maxSurvivors > 0
+        ? FLOOR_DEPTH + (level / model.maxSurvivors) * zSpan
+        : FLOOR_DEPTH;
+
+    const marks: KissPair[] = [];
+
+    for (const level of KISS_DEBUG_LEVELS) {
+      const iso = contourRaw.find(
+        (c) => Math.abs(c.level - level) < EPS
+      );
+      if (!iso?.points) continue;
+      const hits = iso.points.filter(
+        (p) => Math.abs(p.year - yearMax) < EPS
+      );
+      console.log("[KISS HITS]", {
+        level,
+        yearMax,
+        hitCount: hits.length,
+      });
+      if (hits.length === 0) continue;
+      const frontHit = hits.reduce((best, p) =>
+        p.age > best.age ? p : best
+      );
+
+      const surface2D = projectSurfaceYearAge(
+        yearMax,
+        frontHit.age,
+        model.projectedSurface,
+        model.ages,
+        model.years,
+        model.rows,
+        model.cols
+      );
+      if (!surface2D) {
+        console.log("[KISS SURFACE2D NULL]", {
+          level,
+          yearMax,
+          age: frontHit.age,
+        });
+        continue;
+      }
+
+      const rowBelow = findRowSegmentIndex(frontHit.age, model.ages);
+      if (rowBelow < 0 || rowBelow >= model.rows - 1) continue;
+      const rowAbove = rowBelow + 1;
+      const age0 = model.ages[rowBelow];
+      const age1 = model.ages[rowAbove];
+      const t =
+        age1 === age0 ? 0 : (frontHit.age - age0) / (age1 - age0);
+      const colMax = model.cols - 1;
+      const e0 = model.surfacePoints[rowBelow * model.cols + colMax];
+      const e1 = model.surfacePoints[rowAbove * model.cols + colMax];
+      if (!e0 || !e1) continue;
+      const edgePoint = {
+        x: e0.x + t * (e1.x - e0.x),
+        y: e0.y + t * (e1.y - e0.y),
+      };
+
+      const colLeft = findColSegmentIndex(yearMax, model.years);
+      if (colLeft < 0 || colLeft >= model.cols - 1) continue;
+      const colRight = colLeft + 1;
+      const y0 = model.years[colLeft];
+      const y1 = model.years[colRight];
+      const ty = y1 === y0 ? 0 : (yearMax - y0) / (y1 - y0);
+      const p00 = model.surfacePoints[rowBelow * model.cols + colLeft];
+      const p10 = model.surfacePoints[rowBelow * model.cols + colRight];
+      const p01 = model.surfacePoints[rowAbove * model.cols + colLeft];
+      const p11 = model.surfacePoints[rowAbove * model.cols + colRight];
+      if (!p00 || !p10 || !p01 || !p11) continue;
+      const q0 = {
+        x: p00.x + ty * (p10.x - p00.x),
+        y: p00.y + ty * (p10.y - p00.y),
+        z: p00.z + ty * (p10.z - p00.z),
+      };
+      const q1 = {
+        x: p01.x + ty * (p11.x - p01.x),
+        y: p01.y + ty * (p11.y - p01.y),
+        z: p01.z + ty * (p11.z - p01.z),
+      };
+      const surf3D = {
+        x: q0.x + t * (q1.x - q0.x),
+        y: q0.y + t * (q1.y - q0.y),
+        z: q0.z + t * (q1.z - q0.z),
+      };
+
+      const wallZ = zForValue(level);
+      const wall2D = projectIso(
+        { x: edgePoint.x, y: edgePoint.y, z: wallZ },
+        projection
+      );
+
+      const dist = Math.hypot(
+        surface2D.x - wall2D.x,
+        surface2D.y - wall2D.y
+      );
+      const dx = surface2D.x - wall2D.x;
+      const dy = surface2D.y - wall2D.y;
+      const dz = surf3D.z - wallZ;
+      console.log("[KISS DRAW]", {
+        level,
+        age: frontHit.age,
+        distPx: dist,
+        dx,
+        dy,
+        surfZ: surf3D.z,
+        wallZ,
+        dz,
+      });
+      marks.push({
+        level,
+        age: frontHit.age,
+        surface: surface2D,
+        wall: wall2D,
+        dist,
+      });
+    }
+
+    return marks;
+  }, [normalizedKey, contours, model, projection]);
   const { offsetX, offsetY } = useMemo(() => {
     return computeAutoCenterOffset(
       model.projectedSurface,
@@ -605,7 +1000,7 @@ export default function PlateViz({
       WIDTH,
       HEIGHT
     );
-  }, [model.projectedSurface, model.floorPoints]);
+  }, [model.projectedSurface, model.floorPoints, WIDTH, HEIGHT]);
   const maxZ = model.maxZ;
   const shadingConfig = vizStyle.shading;
   const lightDir = normalize3(shadingConfig.lightDir);
@@ -794,7 +1189,7 @@ export default function PlateViz({
     thickWidth: vizStyle.values.thickWidth,
     thinOpacity: vizStyle.values.thinOpacity,
     thickOpacity: vizStyle.values.thickOpacity,
-    heavyStep: vizStyle.values.heavyStep,
+    heavyStep: activeValuesHeavyStep,
   };
   const floorStyle = {
     fill: vizStyle.surface.fill,
@@ -816,7 +1211,7 @@ export default function PlateViz({
     valueStroke: vizStyle.values.stroke,
     valueThin: vizStyle.values.thinWidth,
     valueThick: vizStyle.values.thickWidth,
-    valueHeavyStep: vizStyle.values.heavyStep,
+    valueHeavyStep: activeValuesHeavyStep,
     valueThinOpacity: vizStyle.values.thinOpacity,
     valueThickOpacity: vizStyle.values.thickOpacity,
     surfaceFill: vizStyle.surface.fill,
@@ -827,7 +1222,10 @@ export default function PlateViz({
     years: vizStyle.years,
     ages: vizStyle.ages,
     cohorts: vizStyle.cohorts,
-    values: vizStyle.values,
+    values: {
+      ...vizStyle.values,
+      heavyStep: activeValuesHeavyStep,
+    },
     debugPoints: vizStyle.debugPoints,
   };
   const titleProps = {
@@ -842,6 +1240,7 @@ export default function PlateViz({
       thin: LINE_THIN_WIDTH,
       thick: LINE_THICK_WIDTH,
     },
+    title,
   };
 
   return (
@@ -901,6 +1300,8 @@ export default function PlateViz({
                 floorAlpha={floorAlpha}
                 shadingInkColor={shadingConfig.inkColor}
                 backWallStyle={backWallStyle}
+                backwallFullLevels={valueLevelConfig.backwallFull}
+                backwallRightLevels={valueLevelConfig.backwallRightOnly}
                 floorStyle={floorStyle}
                 floorAgeStyle={floorAgeStyle}
                 rightWallStyle={rightWallStyle}
@@ -911,8 +1312,42 @@ export default function PlateViz({
                 ages={model.ages}
                 maxSurvivors={model.maxSurvivors}
                 floorZ={FLOOR_DEPTH}
-                valueStep={vizStyle.values.heavyStep}
+                valueStep={activeRightWallValueStep}
+                valueMinorStep={activeRightWallMinorStep}
               />
+            )}
+            {KISS_DEBUG_ENABLED && normalizedKey === "usa" && (
+              <g id="kiss-debug">
+                {kissDebugMarks.map((mark, idx) => (
+                  <g key={`kiss-${mark.level}-${idx}`}>
+                    <line
+                      x1={mark.surface.x}
+                      y1={mark.surface.y}
+                      x2={mark.wall.x}
+                      y2={mark.wall.y}
+                      stroke="black"
+                      strokeWidth={2}
+                      opacity={1}
+                    />
+                    <circle
+                      cx={mark.surface.x}
+                      cy={mark.surface.y}
+                      r={10}
+                      fill="none"
+                      stroke="magenta"
+                      strokeWidth={3}
+                    />
+                    <circle
+                      cx={mark.wall.x}
+                      cy={mark.wall.y}
+                      r={10}
+                      fill="none"
+                      stroke="cyan"
+                      strokeWidth={3}
+                    />
+                  </g>
+                ))}
+              </g>
             )}
             {layersEnabled.surface && (
               <SurfaceLayer
@@ -940,6 +1375,9 @@ export default function PlateViz({
                   dimMult: HOVER_DIM_MULT,
                 }}
                 showCohortLines={layersEnabled.cohortLines}
+                depthBuffer={depthBuffer}
+                occlusion={OCCLUSION}
+                surfacePoints={model.surfacePoints}
               />
             )}
             {layersEnabled.labels && (
@@ -956,6 +1394,11 @@ export default function PlateViz({
                   values: { stroke: vizStyle.values.stroke },
                   years: { stroke: vizStyle.years.stroke },
                 }}
+                valueLevels={{
+                  left: valueLevelConfig.left,
+                  right: valueLevelConfig.right,
+                }}
+                showTitle={showTitle}
                 titleProps={titleProps}
                 topValueByYear={topValueByYear}
               />

@@ -14,10 +14,9 @@ type ValueIsolineLabelsProps = {
   tickLen: number;
   textOffset: number;
   style: AxisLabelStyle;
+  leftLevels: number[];
+  rightLevels: number[];
 };
-
-const LEFT_LEVELS = [50_000, 100_000, 150_000];
-const RIGHT_LEVELS = [50_000, 100_000, 150_000, 200_000, 250_000];
 
 export default function ValueIsolineLabels({
   frame,
@@ -28,12 +27,14 @@ export default function ValueIsolineLabels({
   tickLen,
   textOffset,
   style,
+  leftLevels,
+  rightLevels,
 }: ValueIsolineLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
 
   const levelsForSide = (s: LabelSide): number[] =>
-    s === "right" ? RIGHT_LEVELS : LEFT_LEVELS;
+    s === "right" ? rightLevels : leftLevels;
 
   const baseYearFor = (s: LabelSide): number => {
     if (s === "right") {
