@@ -28,8 +28,6 @@ type WallStyle = {
   surfaceStrokeWidth?: number;
 };
 
-let loggedRightWallStyle = false;
-
 type RightWallProps = {
   surfacePoints: Point3D[];
   rows: number;
@@ -80,19 +78,6 @@ export default function RightWall({
   }
 
   void valueStep;
-
-  if (!loggedRightWallStyle) {
-    console.log(
-      "[RIGHTWALL DEBUG]",
-      "surfaceFill=",
-      style.surfaceFill,
-      "wallFill=",
-      style.wallFill,
-      "valueStroke=",
-      style.valueStroke
-    );
-    loggedRightWallStyle = true;
-  }
 
   const colMax = cols - 1;
   const yearMax = frame.maxYear;

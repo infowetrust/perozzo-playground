@@ -208,6 +208,239 @@ const ageStep = ages.length > 1 ? ages[1] - ages[0] : 1;
 const jsonReady: { level: number; points: { year: number; age: number }[] }[] =
   [];
 
+function yearToColIndex(year: number, yearsArr: number[]): number {
+  return yearsArr.indexOf(year);
+}
+
+function crossingAgesForCol(
+  level: number,
+  col: number,
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number[] {
+  const out: number[] = [];
+  for (let r = 0; r < agesArr.length - 1; r++) {
+    const v0 = valuesArr[r * colsTotal + col];
+    const v1 = valuesArr[(r + 1) * colsTotal + col];
+    if (
+      !Number.isFinite(v0) ||
+      !Number.isFinite(v1) ||
+      v0 === v1 ||
+      (level < Math.min(v0, v1) && level > Math.max(v0, v1))
+    ) {
+      const lo = Math.min(v0, v1);
+      const hi = Math.max(v0, v1);
+      if (level < lo || level > hi) continue;
+    }
+    const lo = Math.min(v0, v1);
+    const hi = Math.max(v0, v1);
+    if (level < lo || level > hi || v0 === v1) continue;
+    const t = (level - v0) / (v1 - v0);
+    const age = agesArr[r] + t * (agesArr[r + 1] - agesArr[r]);
+    out.push(age);
+  }
+  return out;
+}
+
+function nearest(target: number, xs: number[]): number {
+  return xs.reduce((best, x) =>
+    Math.abs(x - target) < Math.abs(best - target) ? x : best,
+  xs[0]);
+}
+
+function rowBelowForAge(age: number, agesArr: number[]): number {
+  if (age <= agesArr[0]) return 0;
+  if (age >= agesArr[agesArr.length - 1]) return agesArr.length - 2;
+  for (let r = 0; r < agesArr.length - 1; r++) {
+    if (age >= agesArr[r] && age <= agesArr[r + 1]) return r;
+  }
+  return agesArr.length - 2;
+}
+
+function valueAtColAge(
+  col: number,
+  age: number,
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number | null {
+  if (col < 0 || col >= colsTotal) return null;
+  if (age < agesArr[0] || age > agesArr[agesArr.length - 1]) return null;
+  let row = -1;
+  for (let i = 0; i < agesArr.length - 1; i++) {
+    if (age >= agesArr[i] && age <= agesArr[i + 1]) {
+      row = i;
+      break;
+    }
+  }
+  if (row < 0) return null;
+  const age0 = agesArr[row];
+  const age1 = agesArr[row + 1];
+  const v0 = valuesArr[row * colsTotal + col];
+  const v1 = valuesArr[(row + 1) * colsTotal + col];
+  if (!Number.isFinite(v0) || !Number.isFinite(v1)) return null;
+  if (age1 === age0) return v0;
+  const t = (age - age0) / (age1 - age0);
+  return v0 + t * (v1 - v0);
+}
+
+function fractionalYearBetweenCols(
+  level: number,
+  col0: number,
+  col1: number,
+  age: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number | null {
+  const v0 = valueAtColAge(col0, age, agesArr, valuesArr, colsTotal);
+  const v1 = valueAtColAge(col1, age, agesArr, valuesArr, colsTotal);
+  if (v0 == null || v1 == null) return null;
+  if (v0 === v1) return null;
+  const lo = Math.min(v0, v1);
+  const hi = Math.max(v0, v1);
+  if (level < lo || level > hi) return null;
+  const t = (level - v0) / (v1 - v0);
+  return yearsArr[col0] + t * (yearsArr[col1] - yearsArr[col0]);
+}
+
+function fractionalYearAtAge(
+  level: number,
+  age: number,
+  col0: number,
+  col1: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number | null {
+  const v0 = valueAtColAge(col0, age, agesArr, valuesArr, colsTotal);
+  const v1 = valueAtColAge(col1, age, agesArr, valuesArr, colsTotal);
+  if (v0 == null || v1 == null) return null;
+  if (v0 === v1) return null;
+  const lo = Math.min(v0, v1);
+  const hi = Math.max(v0, v1);
+  if (level < lo || level > hi) return null;
+  const t = (level - v0) / (v1 - v0);
+  return yearsArr[col0] + t * (yearsArr[col1] - yearsArr[col0]);
+}
+
+function fractionalAgeAtYear(
+  level: number,
+  col: number,
+  row0: number,
+  row1: number,
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number | null {
+  const v0 = valuesArr[row0 * colsTotal + col];
+  const v1 = valuesArr[row1 * colsTotal + col];
+  if (!Number.isFinite(v0) || !Number.isFinite(v1) || v0 === v1) return null;
+  const lo = Math.min(v0, v1);
+  const hi = Math.max(v0, v1);
+  if (level < lo || level > hi) return null;
+  const t = (level - v0) / (v1 - v0);
+  return agesArr[row0] + t * (agesArr[row1] - agesArr[row0]);
+}
+
+function adjustEndpointToBoundary(
+  point: YearAgePoint,
+  level: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): YearAgePoint {
+  const yearMin = yearsArr[0];
+  const yearMax = yearsArr[yearsArr.length - 1];
+  const ageMin = agesArr[0];
+  const ageMax = agesArr[agesArr.length - 1];
+  const yearStep = yearsArr[1] - yearsArr[0];
+  const ageStep = agesArr[1] - agesArr[0];
+  const eps = 1e-6;
+
+  const dTop = Math.abs(point.age - ageMin);
+  const dBottom = Math.abs(ageMax - point.age);
+  const dLeft = Math.abs(point.year - yearMin);
+  const dRight = Math.abs(yearMax - point.year);
+
+  const candidates: { side: "top" | "bottom" | "left" | "right"; d: number }[] =
+    [];
+  if (dTop <= ageStep + eps) candidates.push({ side: "top", d: dTop });
+  if (dBottom <= ageStep + eps)
+    candidates.push({ side: "bottom", d: dBottom });
+  if (dLeft <= yearStep + eps) candidates.push({ side: "left", d: dLeft });
+  if (dRight <= yearStep + eps) candidates.push({ side: "right", d: dRight });
+
+  if (candidates.length === 0) {
+    return point;
+  }
+
+  candidates.sort((a, b) => a.d - b.d);
+  const side = candidates[0].side;
+
+  if (side === "top" || side === "bottom") {
+    const ageFixed = side === "top" ? ageMin : ageMax;
+    const colIdx = yearsArr.indexOf(point.year);
+    if (colIdx < 0) return point;
+    const colBefore = Math.max(0, colIdx - 1);
+    const colAfter = Math.min(yearsArr.length - 1, colIdx + 1);
+
+    let yFrac: number | null = null;
+    if (colBefore !== colIdx) {
+      yFrac = fractionalYearAtAge(
+        level,
+        ageFixed,
+        colBefore,
+        colIdx,
+        yearsArr,
+        agesArr,
+        valuesArr,
+        colsTotal
+      );
+    }
+    if (yFrac == null && colAfter !== colIdx) {
+      yFrac = fractionalYearAtAge(
+        level,
+        ageFixed,
+        colIdx,
+        colAfter,
+        yearsArr,
+        agesArr,
+        valuesArr,
+        colsTotal
+      );
+    }
+    if (yFrac != null) {
+      return { year: yFrac, age: ageFixed };
+    }
+    return point;
+  }
+
+  if (side === "left" || side === "right") {
+    const col = side === "left" ? 0 : yearsArr.length - 1;
+    const row = rowBelowForAge(point.age, agesArr);
+    const ageFrac = fractionalAgeAtYear(
+      level,
+      col,
+      row,
+      row + 1,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (ageFrac != null) {
+      return { year: yearsArr[col], age: ageFrac };
+    }
+    return point;
+  }
+
+  return point;
+}
+
 for (const contour of contourSets) {
   const levelValue = Number(contour.value);
   for (const polygon of contour.coordinates) {
@@ -226,7 +459,96 @@ for (const contour of contourSets) {
       });
       const snapped = resampleToYearTicks(points, years);
       if (snapped.length >= 2) {
-        jsonReady.push({ level: levelValue, points: snapped });
+        const corrected: YearAgePoint[] = [];
+        for (const pt of snapped) {
+          const col = yearToColIndex(pt.year, years);
+          if (col < 0) continue;
+          const crossings = crossingAgesForCol(
+            levelValue,
+            col,
+            ages,
+            values,
+            colsCount
+          );
+          if (crossings.length === 0) continue;
+          corrected.push({
+            year: pt.year,
+            age: nearest(pt.age, crossings),
+          });
+        }
+        if (corrected.length >= 2) {
+          const eps = 1e-6;
+          const yearMin = years[0];
+          const colMin = 0;
+          const minYearInLine = Math.min(...corrected.map((p) => p.year));
+          const wantsLeft = minYearInLine <= yearMin + yearStep + eps;
+          if (wantsLeft) {
+            const leftCross = crossingAgesForCol(
+              levelValue,
+              colMin,
+              ages,
+              values,
+              colsCount
+            );
+            if (leftCross.length > 0) {
+              const firstIdx = corrected.reduce(
+                (bestIdx, p, idx) =>
+                  p.year < corrected[bestIdx].year ? idx : bestIdx,
+                0
+              );
+              const targetAge = corrected[firstIdx].age;
+              const chosenAge = nearest(targetAge, leftCross);
+              const alreadyHas = corrected.some(
+                (p) => p.year === yearMin && Math.abs(p.age - chosenAge) < 1e-6
+              );
+              if (!alreadyHas) {
+                corrected.unshift({ year: yearMin, age: chosenAge });
+              }
+            }
+          }
+          if (corrected.length >= 2) {
+            const level = levelValue;
+            const first = corrected[0];
+            const firstCol = years.indexOf(first.year);
+            if (firstCol > 0) {
+              const yFrac = fractionalYearBetweenCols(
+                level,
+                firstCol - 1,
+                firstCol,
+                first.age,
+                years,
+                ages,
+                values,
+                colsCount
+              );
+              if (yFrac != null) {
+                corrected[0] = { year: yFrac, age: first.age };
+              }
+            }
+
+            const last = corrected[corrected.length - 1];
+            const lastCol = years.indexOf(last.year);
+            if (lastCol >= 0 && lastCol < years.length - 1) {
+              const yFrac = fractionalYearBetweenCols(
+                level,
+                lastCol,
+                lastCol + 1,
+                last.age,
+                years,
+                ages,
+                values,
+                colsCount
+              );
+              if (yFrac != null) {
+                corrected[corrected.length - 1] = {
+                  year: yFrac,
+                  age: last.age,
+                };
+              }
+            }
+            jsonReady.push({ level: levelValue, points: corrected });
+          }
+        }
       }
     }
   }

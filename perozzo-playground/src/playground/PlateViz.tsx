@@ -209,13 +209,6 @@ const vizStyle = {
   },
 };
 
-const KISS_DEBUG_ENABLED = true;
-const KISS_DEBUG_LEVELS = [
-  5_000_000,
-  10_000_000,
-  15_000_000,
-  20_000_000,
-];
 
 const OCCLUSION: OcclusionConfig = {
   enabled: false,
@@ -667,7 +660,6 @@ export default function PlateViz({
   rightWallMinorStep,
   activeKey,
 }: PlateVizProps) {
-  console.log("[PLATEVIZ CFG]", { valuesHeavyStep, rightWallValueStep });
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hover, setHover] = useState<null | {
     i: number;
@@ -719,29 +711,6 @@ export default function PlateViz({
           maxRow = row;
         }
       }
-      console.log(
-        `[USA DEBUG] years: start=${yearFirst}, step=${yearStepFirst}, end=${yearLast}, count=${years.length}`
-      );
-      if (uniqueYearSteps.size > 1) {
-        console.log(
-          `[USA DEBUG] unique year steps: ${Array.from(uniqueYearSteps).join(
-            ", "
-          )}`
-        );
-      }
-      console.log(
-        `[USA DEBUG] ages: start=${ageFirst}, step=${ageStepFirst}, end=${ageLast}, count=${ages.length}`
-      );
-      if (uniqueAgeSteps.size > 1) {
-        console.log(
-          `[USA DEBUG] unique age steps: ${Array.from(uniqueAgeSteps).join(
-            ", "
-          )}`
-        );
-      }
-      console.log(
-        `[USA DEBUG] max survivors: ${maxRow.survivors} at year=${maxRow.year}, age=${maxRow.age}`
-      );
     }
     return parsed;
   }, [csvText, isUsaDataset]);
@@ -864,135 +833,6 @@ export default function PlateViz({
     );
   }, [model.projectedSurface, model.surfacePoints]);
 
-  const kissDebugMarks = useMemo(() => {
-    if (!KISS_DEBUG_ENABLED) return [];
-    if (normalizedKey !== "usa") return [];
-    if (!contours || !model || !projection) return [];
-    const contourRaw = contours as ContourFile[];
-    if (!Array.isArray(contourRaw)) return [];
-    const yearMax = model.frame.maxYear;
-    const EPS = 1e-6;
-    const zSpan = model.frame.maxZ - FLOOR_DEPTH || 1;
-    const zForValue = (level: number) =>
-      model.maxSurvivors > 0
-        ? FLOOR_DEPTH + (level / model.maxSurvivors) * zSpan
-        : FLOOR_DEPTH;
-
-    const marks: KissPair[] = [];
-
-    for (const level of KISS_DEBUG_LEVELS) {
-      const iso = contourRaw.find(
-        (c) => Math.abs(c.level - level) < EPS
-      );
-      if (!iso?.points) continue;
-      const hits = iso.points.filter(
-        (p) => Math.abs(p.year - yearMax) < EPS
-      );
-      console.log("[KISS HITS]", {
-        level,
-        yearMax,
-        hitCount: hits.length,
-      });
-      if (hits.length === 0) continue;
-      const frontHit = hits.reduce((best, p) =>
-        p.age > best.age ? p : best
-      );
-
-      const surface2D = projectSurfaceYearAge(
-        yearMax,
-        frontHit.age,
-        model.projectedSurface,
-        model.ages,
-        model.years,
-        model.rows,
-        model.cols
-      );
-      if (!surface2D) {
-        console.log("[KISS SURFACE2D NULL]", {
-          level,
-          yearMax,
-          age: frontHit.age,
-        });
-        continue;
-      }
-
-      const rowBelow = findRowSegmentIndex(frontHit.age, model.ages);
-      if (rowBelow < 0 || rowBelow >= model.rows - 1) continue;
-      const rowAbove = rowBelow + 1;
-      const age0 = model.ages[rowBelow];
-      const age1 = model.ages[rowAbove];
-      const t =
-        age1 === age0 ? 0 : (frontHit.age - age0) / (age1 - age0);
-      const colMax = model.cols - 1;
-      const e0 = model.surfacePoints[rowBelow * model.cols + colMax];
-      const e1 = model.surfacePoints[rowAbove * model.cols + colMax];
-      if (!e0 || !e1) continue;
-      const edgePoint = {
-        x: e0.x + t * (e1.x - e0.x),
-        y: e0.y + t * (e1.y - e0.y),
-      };
-
-      const colLeft = findColSegmentIndex(yearMax, model.years);
-      if (colLeft < 0 || colLeft >= model.cols - 1) continue;
-      const colRight = colLeft + 1;
-      const y0 = model.years[colLeft];
-      const y1 = model.years[colRight];
-      const ty = y1 === y0 ? 0 : (yearMax - y0) / (y1 - y0);
-      const p00 = model.surfacePoints[rowBelow * model.cols + colLeft];
-      const p10 = model.surfacePoints[rowBelow * model.cols + colRight];
-      const p01 = model.surfacePoints[rowAbove * model.cols + colLeft];
-      const p11 = model.surfacePoints[rowAbove * model.cols + colRight];
-      if (!p00 || !p10 || !p01 || !p11) continue;
-      const q0 = {
-        x: p00.x + ty * (p10.x - p00.x),
-        y: p00.y + ty * (p10.y - p00.y),
-        z: p00.z + ty * (p10.z - p00.z),
-      };
-      const q1 = {
-        x: p01.x + ty * (p11.x - p01.x),
-        y: p01.y + ty * (p11.y - p01.y),
-        z: p01.z + ty * (p11.z - p01.z),
-      };
-      const surf3D = {
-        x: q0.x + t * (q1.x - q0.x),
-        y: q0.y + t * (q1.y - q0.y),
-        z: q0.z + t * (q1.z - q0.z),
-      };
-
-      const wallZ = zForValue(level);
-      const wall2D = projectIso(
-        { x: edgePoint.x, y: edgePoint.y, z: wallZ },
-        projection
-      );
-
-      const dist = Math.hypot(
-        surface2D.x - wall2D.x,
-        surface2D.y - wall2D.y
-      );
-      const dx = surface2D.x - wall2D.x;
-      const dy = surface2D.y - wall2D.y;
-      const dz = surf3D.z - wallZ;
-      console.log("[KISS DRAW]", {
-        level,
-        age: frontHit.age,
-        distPx: dist,
-        dx,
-        dy,
-        surfZ: surf3D.z,
-        wallZ,
-        dz,
-      });
-      marks.push({
-        level,
-        age: frontHit.age,
-        surface: surface2D,
-        wall: wall2D,
-        dist,
-      });
-    }
-
-    return marks;
-  }, [normalizedKey, contours, model, projection]);
   const { offsetX, offsetY } = useMemo(() => {
     return computeAutoCenterOffset(
       model.projectedSurface,
@@ -1315,39 +1155,6 @@ export default function PlateViz({
                 valueStep={activeRightWallValueStep}
                 valueMinorStep={activeRightWallMinorStep}
               />
-            )}
-            {KISS_DEBUG_ENABLED && normalizedKey === "usa" && (
-              <g id="kiss-debug">
-                {kissDebugMarks.map((mark, idx) => (
-                  <g key={`kiss-${mark.level}-${idx}`}>
-                    <line
-                      x1={mark.surface.x}
-                      y1={mark.surface.y}
-                      x2={mark.wall.x}
-                      y2={mark.wall.y}
-                      stroke="black"
-                      strokeWidth={2}
-                      opacity={1}
-                    />
-                    <circle
-                      cx={mark.surface.x}
-                      cy={mark.surface.y}
-                      r={10}
-                      fill="none"
-                      stroke="magenta"
-                      strokeWidth={3}
-                    />
-                    <circle
-                      cx={mark.wall.x}
-                      cy={mark.wall.y}
-                      r={10}
-                      fill="none"
-                      stroke="cyan"
-                      strokeWidth={3}
-                    />
-                  </g>
-                ))}
-              </g>
             )}
             {layersEnabled.surface && (
               <SurfaceLayer

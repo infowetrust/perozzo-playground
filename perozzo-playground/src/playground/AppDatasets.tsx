@@ -1,4 +1,4 @@
-import { useState, ChangeEvent, useEffect } from "react";
+import { useState, ChangeEvent } from "react";
 
 import PlateViz from "./PlateViz";
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
@@ -50,15 +50,8 @@ const DATASETS = {
 type DatasetKey = keyof typeof DATASETS;
 
 export default function AppDatasets() {
-  const [datasetKey, setDatasetKey] = useState<DatasetKey>("sweden");
+  const [datasetKey, setDatasetKey] = useState<DatasetKey>("usa");
   const active = DATASETS[datasetKey];
-  useEffect(() => {
-    console.log("[DATASET CFG]", {
-      key: datasetKey,
-      valuesHeavyStep: active.valuesHeavyStep,
-      rightWallValueStep: active.rightWallValueStep,
-    });
-  }, [datasetKey, active]);
 
   const handleChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextKey = event.target.value as DatasetKey;

@@ -1,20 +1,17 @@
-import { useRef } from "react";
-
 import type { Point2D, Point3D } from "../../core/types";
 import type { LineStyle } from "../vizConfig";
 import { isHeavy } from "../vizConfig";
-import {
-  occlusionFactor,
-  pointDepth3D,
-  type DepthBuffer,
-  type OcclusionConfig,
-} from "../occlusion";
+import type { DepthBuffer, OcclusionConfig } from "../occlusion";
+import { pointDepth3D, occlusionFactor } from "../occlusion";
 
 type Polyline = {
   points: Point2D[];
-  indices: number[];
+  indices?: number[]; // optional: surfacePoints indices for each point
   heavy: boolean;
-  [key: string]: any;
+  // optional identifiers used by hover focus
+  year?: number;
+  age?: number;
+  birthYear?: number;
 };
 
 type ValueContour = {
@@ -38,10 +35,16 @@ type DataLinesLayerProps = {
   showCohortLines: boolean;
   focus?: { year: number; age: number; birthYear: number } | null;
   hoverOpacity?: { highlightMult: number; dimMult: number };
-  depthBuffer?: DepthBuffer | null;
+
+  // Optional occlusion (safe if not provided)
+  depthBuffer?: DepthBuffer;
   occlusion?: OcclusionConfig;
-  surfacePoints: Point3D[];
+  surfacePoints?: Point3D[];
 };
+
+function clamp01(x: number) {
+  return Math.max(0, Math.min(1, x));
+}
 
 export default function DataLinesLayer({
   yearLines,
@@ -61,172 +64,164 @@ export default function DataLinesLayer({
   const dimMult = hoverOpacity?.dimMult ?? 1;
   const hasFocus = !!focus;
 
-  const applyHover = (base: number, isHit: boolean, hasFocus: boolean) => {
+  const applyHover = (base: number, isHit: boolean) => {
     if (!hasFocus) return base;
     const mult = isHit ? highlightMult : dimMult;
-    return Math.min(1, Math.max(0, base * mult));
+    return clamp01(base * mult);
   };
 
-  const lastLoggedRef = useRef<number | null>(null);
+  const occlEnabled = !!(occlusion && occlusion.enabled && depthBuffer && surfacePoints);
 
-  if (lastLoggedRef.current !== vizStyle.values.heavyStep) {
-    const levels = contourPolylines2D.map((iso) => iso.level);
-    const head = levels.slice(0, 5);
-    const tail = levels.slice(-5);
-    console.log("[VALUES DEBUG]", {
-      heavyStep: vizStyle.values.heavyStep,
-      firstLevels: head,
-      lastLevels: tail,
-    });
-    lastLoggedRef.current = vizStyle.values.heavyStep;
-  }
+  const segOpacity = (baseOpacity: number, p0: Point2D, p1: Point2D, d0?: number, d1?: number) => {
+    if (!occlEnabled || !depthBuffer || !occlusion) return baseOpacity;
+    const mx = (p0.x + p1.x) / 2;
+    const my = (p0.y + p1.y) / 2;
+    const depthMid =
+      d0 != null && d1 != null ? (d0 + d1) / 2 : 0;
+    const f = occlusionFactor(depthBuffer, mx, my, depthMid, occlusion);
+    return clamp01(baseOpacity * f);
+  };
 
-  const occlusionCfg = occlusion;
-
-  const renderOccludedPolyline = (
+  const renderPolylineAsSegments = (
     line: Polyline,
-    keyBase: string,
     stroke: string,
-    strokeWidth: number,
-    baseOpacity: number
+    width: number,
+    baseOpacity: number,
+    isHit: boolean
   ) => {
-    const segments: JSX.Element[] = [];
-    if (!line.points || line.points.length < 2) return segments;
-    for (let i = 0; i < line.points.length - 1; i++) {
-      const p0 = line.points[i];
-      const p1 = line.points[i + 1];
-      if (!p0 || !p1) continue;
-      let opacity = baseOpacity;
-      if (occlusionCfg && depthBuffer && line.indices) {
-        const idx0 = line.indices[i];
-        const idx1 = line.indices[i + 1];
-        const sp0 = surfacePoints[idx0];
-        const sp1 = surfacePoints[idx1];
-        if (sp0 && sp1) {
-          const depthMid =
-            (pointDepth3D(sp0) + pointDepth3D(sp1)) * 0.5;
-          const midX = (p0.x + p1.x) * 0.5;
-          const midY = (p0.y + p1.y) * 0.5;
-          const factor = occlusionFactor(
-            depthBuffer,
-            midX,
-            midY,
-            depthMid,
-            occlusionCfg
-          );
-          if (factor === 0) continue;
-          opacity *= factor;
-        }
-      }
-      if (opacity <= 0) continue;
-      segments.push(
+    const pts = line.points;
+    if (pts.length < 2) return null;
+
+    const inds = line.indices;
+    const useDepth = occlEnabled && inds && inds.length === pts.length && surfacePoints;
+
+    const out: any[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[i];
+      const p1 = pts[i + 1];
+      const d0 = useDepth ? pointDepth3D(surfacePoints![inds![i]]) : undefined;
+      const d1 = useDepth ? pointDepth3D(surfacePoints![inds![i + 1]]) : undefined;
+      const op = segOpacity(applyHover(baseOpacity, isHit), p0, p1, d0, d1);
+      if (op <= 0) continue;
+      out.push(
         <line
-          key={`${keyBase}-seg-${i}`}
+          key={`seg-${stroke}-${i}`}
           x1={p0.x}
           y1={p0.y}
           x2={p1.x}
           y2={p1.y}
           stroke={stroke}
-          strokeWidth={strokeWidth}
-          strokeOpacity={opacity}
+          strokeWidth={width}
+          strokeOpacity={op}
           strokeLinecap="round"
         />
       );
     }
-    return segments;
+    return <g key={`segwrap-${stroke}`}>{out}</g>;
   };
 
   return (
     <g id="layer-lines">
+      {/* GREEN surface value isolines */}
       <g>
-        {contourPolylines2D.map((iso, i) => (
+        {contourPolylines2D.map((iso, i) => {
+          const heavy = isHeavy(iso.level, vizStyle.values.heavyStep);
+          return (
+            <polyline
+              key={`val-${iso.level}-${i}`}
+              points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.values.stroke}
+              strokeWidth={heavy ? vizStyle.values.thickWidth : vizStyle.values.thinWidth}
+              strokeOpacity={heavy ? vizStyle.values.thickOpacity : vizStyle.values.thinOpacity}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          );
+        })}
+      </g>
+
+      {/* BLUE cohort lines */}
+      {showCohortLines &&
+        cohortLines.map((line) => {
+          const isHit = !!(focus && line.birthYear === focus.birthYear);
+          const width = line.heavy ? vizStyle.cohorts.thickWidth : vizStyle.cohorts.thinWidth;
+          const opBase = line.heavy ? vizStyle.cohorts.thickOpacity : vizStyle.cohorts.thinOpacity;
+          // Render as segments only if occlusion is enabled and indices exist; else polyline.
+          if (occlEnabled && line.indices && surfacePoints) {
+            return (
+              <g key={`cohort-${line.birthYear}`}>
+                {renderPolylineAsSegments(line, vizStyle.cohorts.stroke, width, opBase, isHit)}
+              </g>
+            );
+          }
+          return (
+            <polyline
+              key={`cohort-${line.birthYear}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.cohorts.stroke}
+              strokeWidth={width}
+              strokeOpacity={applyHover(opBase, isHit)}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          );
+        })}
+
+      {/* GRAY age lines */}
+      {ageLines.map((line) => {
+        const isHit = !!(focus && line.age === focus.age);
+        const width = line.heavy ? vizStyle.ages.thickWidth : vizStyle.ages.thinWidth;
+        const opBase = line.heavy ? vizStyle.ages.thickOpacity : vizStyle.ages.thinOpacity;
+        if (occlEnabled && line.indices && surfacePoints) {
+          return (
+            <g key={`age-${line.age}`}>
+              {renderPolylineAsSegments(line, vizStyle.ages.stroke, width, opBase, isHit)}
+            </g>
+          );
+        }
+        return (
           <polyline
-            key={`val-${iso.level}-${i}`}
-            points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
+            key={`age-${line.age}`}
+            points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
             fill="none"
-            stroke={vizStyle.values.stroke}
-            strokeWidth={
-              isHeavy(iso.level, vizStyle.values.heavyStep)
-                ? vizStyle.values.thickWidth
-                : vizStyle.values.thinWidth
-            }
-            strokeOpacity={
-              isHeavy(iso.level, vizStyle.values.heavyStep)
-                ? vizStyle.values.thickOpacity
-                : vizStyle.values.thinOpacity
-            }
+            stroke={vizStyle.ages.stroke}
+            strokeWidth={width}
+            strokeOpacity={applyHover(opBase, isHit)}
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-        ))}
-      </g>
-      {showCohortLines &&
-        cohortLines.map((line) => {
-          const baseOpacity = applyHover(
-            line.heavy
-              ? vizStyle.cohorts.thickOpacity
-              : vizStyle.cohorts.thinOpacity,
-            !!(focus && line.birthYear === focus.birthYear),
-            hasFocus
-          );
+        );
+      })}
+
+      {/* RED year lines */}
+      {yearLines.map((line) => {
+        const isHit = !!(focus && line.year === focus.year);
+        const width = line.heavy ? vizStyle.years.thickWidth : vizStyle.years.thinWidth;
+        const opBase = line.heavy ? vizStyle.years.thickOpacity : vizStyle.years.thinOpacity;
+        if (occlEnabled && line.indices && surfacePoints) {
           return (
-            <g key={`cohort-${line.birthYear}`}>
-              {renderOccludedPolyline(
-                line,
-                `cohort-${line.birthYear}`,
-                vizStyle.cohorts.stroke,
-                line.heavy
-                  ? vizStyle.cohorts.thickWidth
-                  : vizStyle.cohorts.thinWidth,
-                baseOpacity
-              )}
+            <g key={`year-${line.year}`}>
+              {renderPolylineAsSegments(line, vizStyle.years.stroke, width, opBase, isHit)}
             </g>
           );
-        })}
-      {ageLines.map((line) => {
-        const baseOpacity = applyHover(
-          line.heavy
-            ? vizStyle.ages.thickOpacity
-            : vizStyle.ages.thinOpacity,
-          !!(focus && line.age === focus.age),
-          hasFocus
-        );
+        }
         return (
-          <g key={`age-${line.age}`}>
-            {renderOccludedPolyline(
-              line,
-              `age-${line.age}`,
-              vizStyle.ages.stroke,
-              line.heavy
-                ? vizStyle.ages.thickWidth
-                : vizStyle.ages.thinWidth,
-              baseOpacity
-            )}
-          </g>
+          <polyline
+            key={`year-${line.year}`}
+            points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+            fill="none"
+            stroke={vizStyle.years.stroke}
+            strokeWidth={width}
+            strokeOpacity={applyHover(opBase, isHit)}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         );
       })}
-      {yearLines.map((line) => {
-        const baseOpacity = applyHover(
-          line.heavy
-            ? vizStyle.years.thickOpacity
-            : vizStyle.years.thinOpacity,
-          !!(focus && line.year === focus.year),
-          hasFocus
-        );
-        return (
-          <g key={`year-${line.year}`}>
-            {renderOccludedPolyline(
-              line,
-              `year-${line.year}`,
-              vizStyle.years.stroke,
-              line.heavy
-                ? vizStyle.years.thickWidth
-                : vizStyle.years.thinWidth,
-              baseOpacity
-            )}
-          </g>
-        );
-      })}
+
+      {/* debug grid points */}
       {projectedSurface.map((p, i) => (
         <circle
           key={i}
