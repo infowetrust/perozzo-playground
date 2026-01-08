@@ -1,18 +1,26 @@
 /**
- * Utility to precompute contour lines for the USA population data and
- * write ./src/data/usa-contours.json.
+ * Precompute contour isolines for USA population survivors and write
+ * ./src/data/usa-contours.json.
  *
  * Run from project root:
  *   ts-node buildContoursUSA.ts
- * or add a matching npm script similar to build:contours.
+ * or via package script (npm run build:contours:usa).
  */
+
+/* ---------- IMPORTS + PATHS ---------- */
 
 import fs from "fs";
 import path from "path";
-
 import { contours as d3Contours } from "d3-contour";
 
 import { GridField } from "./src/core/contours";
+
+const csvPath = path.resolve(
+  "./src/data/usa-pop-1900-2025-5yr-native-topbins.csv"
+);
+const contoursOutPath = path.resolve("./src/data/usa-contours.json");
+
+/* ---------- TYPES ---------- */
 
 type UsaCsvRow = {
   year: number;
@@ -21,6 +29,8 @@ type UsaCsvRow = {
 };
 
 type YearAgePoint = { year: number; age: number };
+
+/* ---------- HELPER FUNCTIONS ---------- */
 
 function resampleToYearTicks(
   points: YearAgePoint[],
@@ -42,7 +52,6 @@ function resampleToYearTicks(
   const closed =
     Math.abs(points[0].year - points[points.length - 1].year) < 1e-9 &&
     Math.abs(points[0].age - points[points.length - 1].age) < 1e-9;
-
   const n = closed ? points.length - 1 : points.length;
 
   for (let i = 0; i < n; i++) {
@@ -82,171 +91,36 @@ function resampleToYearTicks(
   return out.length >= 2 ? out : [];
 }
 
-const csvPath = path.resolve(
-  "./src/data/usa-pop-1900-2025-5yr-native-topbins.csv"
-);
-const contoursOutPath = path.resolve("./src/data/usa-contours.json");
-
-function parseUsaCsv(csvText: string): UsaCsvRow[] {
-  const trimmed = csvText.trim();
-  if (!trimmed) {
-    return [];
-  }
-
-  const lines = trimmed.split(/\r?\n/);
-  const headerCells = lines[0].split(",").map((cell) => cell.trim().toLowerCase());
-
-  const yearIdx = headerCells.findIndex((h) => h === "year");
-  const ageIdx = headerCells.findIndex((h) => h === "age");
-  const survivorsIdx = headerCells.findIndex((h) => h === "survivors");
-
-  if (yearIdx === -1 || ageIdx === -1 || survivorsIdx === -1) {
-    throw new Error(
-      "USA CSV is missing required headers (year, age, survivors)."
-    );
-  }
-
-  const rows: UsaCsvRow[] = [];
-
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-
-    const cells = line.split(",");
-
-    const year = Number(cells[yearIdx]?.trim());
-    const age = Number(cells[ageIdx]?.trim());
-    const survivors = Number(cells[survivorsIdx]?.trim());
-
+function dedupPoints(
+  pts: YearAgePoint[],
+  epsYear = 1e-9,
+  epsAge = 1e-9
+): YearAgePoint[] {
+  const out: YearAgePoint[] = [];
+  for (const p of pts) {
+    const last = out[out.length - 1];
     if (
-      !Number.isFinite(year) ||
-      !Number.isFinite(age) ||
-      !Number.isFinite(survivors)
+      last &&
+      Math.abs(last.year - p.year) < epsYear &&
+      Math.abs(last.age - p.age) < epsAge
     ) {
       continue;
     }
-
-    rows.push({ year, age, survivors });
-  }
-
-  return rows;
-}
-
-// --- 1. Read CSV ---
-
-const csvText = fs.readFileSync(csvPath, "utf8");
-const rows = parseUsaCsv(csvText);
-
-// --- 2. Build grid axes (years, ages) ---
-
-const years = Array.from(new Set(rows.map((r) => r.year))).sort(
-  (a, b) => a - b
-);
-const ages = Array.from(new Set(rows.map((r) => r.age))).sort(
-  (a, b) => a - b
-);
-
-const rowsCount = ages.length;
-const colsCount = years.length;
-
-// --- 3. Fill scalar field values[row * cols + col] with survivors ---
-
-const values = new Array<number>(rowsCount * colsCount).fill(NaN);
-
-for (const r of rows) {
-  const rowIndex = ages.indexOf(r.age);
-  const colIndex = years.indexOf(r.year);
-  if (rowIndex === -1 || colIndex === -1) continue;
-
-  const idx = rowIndex * colsCount + colIndex;
-  values[idx] = r.survivors;
-}
-
-const field: GridField = {
-  rows: rowsCount,
-  cols: colsCount,
-  values,
-  ages,
-  years,
-};
-
-// --- 4. Decide contour levels ---
-
-let maxSurvivors = -Infinity;
-for (const v of values) {
-  if (Number.isFinite(v) && v > maxSurvivors) {
-    maxSurvivors = v;
-  }
-}
-
-if (!Number.isFinite(maxSurvivors) || maxSurvivors <= 0) {
-  throw new Error("Invalid maxSurvivors; check USA data.");
-}
-
-const levelStep = 1_000_000;
-const levels: number[] = [];
-const maxLevel = Math.floor(maxSurvivors / levelStep) * levelStep;
-
-for (let level = levelStep; level <= maxLevel; level += levelStep) {
-  levels.push(level);
-}
-
-// --- 5. Compute isolines via d3-contour ---
-
-const generator = d3Contours()
-  .size([field.cols, field.rows])
-  .thresholds(levels);
-const contourSets = generator(field.values);
-
-const yearBase = years[0] ?? 0;
-const ageBase = ages[0] ?? 0;
-const maxYear = years[years.length - 1] ?? yearBase;
-const maxAge = ages[ages.length - 1] ?? ageBase;
-const yearStep = years.length > 1 ? years[1] - years[0] : 1;
-const ageStep = ages.length > 1 ? ages[1] - ages[0] : 1;
-
-const jsonReady: { level: number; points: { year: number; age: number }[] }[] =
-  [];
-
-function yearToColIndex(year: number, yearsArr: number[]): number {
-  return yearsArr.indexOf(year);
-}
-
-function crossingAgesForCol(
-  level: number,
-  col: number,
-  agesArr: number[],
-  valuesArr: number[],
-  colsTotal: number
-): number[] {
-  const out: number[] = [];
-  for (let r = 0; r < agesArr.length - 1; r++) {
-    const v0 = valuesArr[r * colsTotal + col];
-    const v1 = valuesArr[(r + 1) * colsTotal + col];
-    if (
-      !Number.isFinite(v0) ||
-      !Number.isFinite(v1) ||
-      v0 === v1 ||
-      (level < Math.min(v0, v1) && level > Math.max(v0, v1))
-    ) {
-      const lo = Math.min(v0, v1);
-      const hi = Math.max(v0, v1);
-      if (level < lo || level > hi) continue;
-    }
-    const lo = Math.min(v0, v1);
-    const hi = Math.max(v0, v1);
-    if (level < lo || level > hi || v0 === v1) continue;
-    const t = (level - v0) / (v1 - v0);
-    const age = agesArr[r] + t * (agesArr[r + 1] - agesArr[r]);
-    out.push(age);
+    out.push(p);
   }
   return out;
 }
 
-function nearest(target: number, xs: number[]): number {
-  return xs.reduce((best, x) =>
-    Math.abs(x - target) < Math.abs(best - target) ? x : best,
-  xs[0]);
+function nearest(target: number, xs: number[]): number | null {
+  if (xs.length === 0 || !Number.isFinite(target)) return null;
+  let best = xs[0];
+  for (const x of xs) {
+    if (!Number.isFinite(x)) continue;
+    if (Math.abs(x - target) < Math.abs(best - target)) {
+      best = x;
+    }
+  }
+  return Number.isFinite(best) ? best : null;
 }
 
 function rowBelowForAge(age: number, agesArr: number[]): number {
@@ -285,25 +159,28 @@ function valueAtColAge(
   return v0 + t * (v1 - v0);
 }
 
-function fractionalYearBetweenCols(
+function crossingAgesForCol(
   level: number,
-  col0: number,
-  col1: number,
-  age: number,
-  yearsArr: number[],
+  col: number,
   agesArr: number[],
   valuesArr: number[],
   colsTotal: number
-): number | null {
-  const v0 = valueAtColAge(col0, age, agesArr, valuesArr, colsTotal);
-  const v1 = valueAtColAge(col1, age, agesArr, valuesArr, colsTotal);
-  if (v0 == null || v1 == null) return null;
-  if (v0 === v1) return null;
-  const lo = Math.min(v0, v1);
-  const hi = Math.max(v0, v1);
-  if (level < lo || level > hi) return null;
-  const t = (level - v0) / (v1 - v0);
-  return yearsArr[col0] + t * (yearsArr[col1] - yearsArr[col0]);
+): number[] {
+  const out: number[] = [];
+  for (let r = 0; r < agesArr.length - 1; r++) {
+    const v0 = valuesArr[r * colsTotal + col];
+    const v1 = valuesArr[(r + 1) * colsTotal + col];
+    if (!Number.isFinite(v0) || !Number.isFinite(v1) || v0 === v1) continue;
+    const lo = Math.min(v0, v1);
+    const hi = Math.max(v0, v1);
+    if (level < lo || level > hi) continue;
+    const t = (level - v0) / (v1 - v0);
+    const age = agesArr[r] + t * (agesArr[r + 1] - agesArr[r]);
+    if (Number.isFinite(age)) {
+      out.push(age);
+    }
+  }
+  return out;
 }
 
 function fractionalYearAtAge(
@@ -318,8 +195,7 @@ function fractionalYearAtAge(
 ): number | null {
   const v0 = valueAtColAge(col0, age, agesArr, valuesArr, colsTotal);
   const v1 = valueAtColAge(col1, age, agesArr, valuesArr, colsTotal);
-  if (v0 == null || v1 == null) return null;
-  if (v0 === v1) return null;
+  if (v0 == null || v1 == null || v0 === v1) return null;
   const lo = Math.min(v0, v1);
   const hi = Math.max(v0, v1);
   if (level < lo || level > hi) return null;
@@ -374,10 +250,7 @@ function adjustEndpointToBoundary(
     candidates.push({ side: "bottom", d: dBottom });
   if (dLeft <= yearStep + eps) candidates.push({ side: "left", d: dLeft });
   if (dRight <= yearStep + eps) candidates.push({ side: "right", d: dRight });
-
-  if (candidates.length === 0) {
-    return point;
-  }
+  if (candidates.length === 0) return point;
 
   candidates.sort((a, b) => a.d - b.d);
   const side = candidates[0].side;
@@ -414,10 +287,7 @@ function adjustEndpointToBoundary(
         colsTotal
       );
     }
-    if (yFrac != null) {
-      return { year: yFrac, age: ageFixed };
-    }
-    return point;
+    return yFrac != null ? { year: yFrac, age: ageFixed } : point;
   }
 
   if (side === "left" || side === "right") {
@@ -432,21 +302,234 @@ function adjustEndpointToBoundary(
       valuesArr,
       colsTotal
     );
-    if (ageFrac != null) {
-      return { year: yearsArr[col], age: ageFrac };
-    }
-    return point;
+    return ageFrac != null ? { year: yearsArr[col], age: ageFrac } : point;
   }
 
   return point;
 }
 
+function rotateToMinYear(pts: YearAgePoint[]): YearAgePoint[] {
+  if (pts.length === 0) return pts;
+  let minIdx = 0;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i].year < pts[minIdx].year) {
+      minIdx = i;
+    }
+  }
+  return pts.slice(minIdx).concat(pts.slice(0, minIdx));
+}
+
+function extendByColumnCrossings(
+  pts: YearAgePoint[],
+  level: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): YearAgePoint[] {
+  if (pts.length < 2) return pts;
+  const yearIndex = new Map<number, number>();
+  yearsArr.forEach((y, i) => yearIndex.set(y, i));
+  const eps = 1e-6;
+
+  while (true) {
+    const first = pts[0];
+    const col = yearIndex.get(first.year);
+    if (col == null || col <= 0) break;
+    const prevCol = col - 1;
+    const prevYear = yearsArr[prevCol];
+    if (Math.abs(prevYear - first.year) < eps) break;
+    const crosses = crossingAgesForCol(
+      level,
+      prevCol,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (crosses.length === 0) break;
+    const age = nearest(first.age, crosses);
+    if (age == null) break;
+    pts.unshift({ year: prevYear, age });
+  }
+
+  while (true) {
+    const last = pts[pts.length - 1];
+    const col = yearIndex.get(last.year);
+    if (col == null || col >= yearsArr.length - 1) break;
+    const nextCol = col + 1;
+    const nextYear = yearsArr[nextCol];
+    if (Math.abs(nextYear - last.year) < eps) break;
+    const crosses = crossingAgesForCol(
+      level,
+      nextCol,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (crosses.length === 0) break;
+    const age = nearest(last.age, crosses);
+    if (age == null) break;
+    pts.push({ year: nextYear, age });
+  }
+
+  return pts;
+}
+
+function splitByYearDirection(pts: YearAgePoint[]): YearAgePoint[][] {
+  if (pts.length === 0) return [];
+  const runs: YearAgePoint[][] = [];
+  let current: YearAgePoint[] = [pts[0]];
+  let prevSign = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const prev = pts[i - 1];
+    const curr = pts[i];
+    const diff = curr.year - prev.year;
+    const sign = Math.sign(diff);
+    if (sign !== 0 && prevSign !== 0 && sign !== prevSign) {
+      runs.push(current);
+      current = [prev, curr];
+      prevSign = sign;
+      continue;
+    }
+    if (sign !== 0) prevSign = sign;
+    current.push(curr);
+  }
+  if (current.length >= 1) {
+    runs.push(current);
+  }
+  return runs;
+}
+
+function pickBestRun(runs: YearAgePoint[][]): YearAgePoint[] | null {
+  if (runs.length === 0) return null;
+  let best = runs[0];
+  let bestSpan =
+    best.length >= 2 ? Math.abs(best[best.length - 1].year - best[0].year) : 0;
+  for (let i = 1; i < runs.length; i++) {
+    const run = runs[i];
+    const span =
+      run.length >= 2 ? Math.abs(run[run.length - 1].year - run[0].year) : 0;
+    if (span > bestSpan) {
+      best = run;
+      bestSpan = span;
+    } else if (span === bestSpan && run.length > best.length) {
+      best = run;
+    }
+  }
+  return best;
+}
+
+/* ---------- READ + PARSE TIDY CSV ---------- */
+
+function parseUsaCsv(csvText: string): UsaCsvRow[] {
+  const trimmed = csvText.trim();
+  if (!trimmed) return [];
+
+  const lines = trimmed.split(/\r?\n/);
+  const headerCells = lines[0].split(",").map((cell) => cell.trim().toLowerCase());
+
+  const yearIdx = headerCells.findIndex((h) => h === "year");
+  const ageIdx = headerCells.findIndex((h) => h === "age");
+  const survivorsIdx = headerCells.findIndex((h) => h === "survivors");
+
+  if (yearIdx === -1 || ageIdx === -1 || survivorsIdx === -1) {
+    throw new Error("USA CSV missing required headers (year, age, survivors)");
+  }
+
+  const rows: UsaCsvRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cells = line.split(",");
+    const year = Number(cells[yearIdx]?.trim());
+    const age = Number(cells[ageIdx]?.trim());
+    const survivors = Number(cells[survivorsIdx]?.trim());
+    if (
+      !Number.isFinite(year) ||
+      !Number.isFinite(age) ||
+      !Number.isFinite(survivors)
+    ) {
+      continue;
+    }
+    rows.push({ year, age, survivors });
+  }
+  return rows;
+}
+
+const csvText = fs.readFileSync(csvPath, "utf8");
+const rows = parseUsaCsv(csvText);
+
+/* ---------- BUILD GRID (YEARS/AGES/VALUES) ---------- */
+
+const years = Array.from(new Set(rows.map((r) => r.year))).sort(
+  (a, b) => a - b
+);
+const ages = Array.from(new Set(rows.map((r) => r.age))).sort(
+  (a, b) => a - b
+);
+
+const rowsCount = ages.length;
+const colsCount = years.length;
+
+const values = new Array<number>(rowsCount * colsCount).fill(NaN);
+for (const r of rows) {
+  const rowIndex = ages.indexOf(r.age);
+  const colIndex = years.indexOf(r.year);
+  if (rowIndex === -1 || colIndex === -1) continue;
+  values[rowIndex * colsCount + colIndex] = r.survivors;
+}
+
+const field: GridField = {
+  rows: rowsCount,
+  cols: colsCount,
+  values,
+  ages,
+  years,
+};
+
+/* ---------- CHOOSE CONTOUR LEVELS ---------- */
+
+let maxSurvivors = -Infinity;
+for (const v of values) {
+  if (Number.isFinite(v) && v > maxSurvivors) maxSurvivors = v;
+}
+if (!Number.isFinite(maxSurvivors) || maxSurvivors <= 0) {
+  throw new Error("Invalid maxSurvivors; check input data.");
+}
+
+const levelStep = 1_000_000;
+const levels: number[] = [];
+const maxLevel = Math.floor(maxSurvivors / levelStep) * levelStep;
+for (let level = levelStep; level <= maxLevel; level += levelStep) {
+  levels.push(level);
+}
+
+/* ---------- COMPUTE RAW ISOLINES ---------- */
+
+const generator = d3Contours()
+  .size([field.cols, field.rows])
+  .thresholds(levels);
+const contourSets = generator(field.values);
+
+const yearBase = years[0] ?? 0;
+const ageBase = ages[0] ?? 0;
+const maxYear = years[years.length - 1] ?? yearBase;
+const maxAge = ages[ages.length - 1] ?? ageBase;
+const yearStep = years.length > 1 ? years[1] - years[0] : 1;
+const ageStep = ages.length > 1 ? ages[1] - ages[0] : 1;
+
+const jsonReady: { level: number; points: YearAgePoint[] }[] = [];
+
+/* ---------- NORMALIZE EACH RING INTO CLEAN POLYLINE ---------- */
+
 for (const contour of contourSets) {
   const levelValue = Number(contour.value);
+
   for (const polygon of contour.coordinates) {
     for (const ring of polygon) {
       if (!ring || ring.length < 2) continue;
-      const points = ring.map((point) => {
+
+      const ringPoints = ring.map((point) => {
         const [x, y] = point;
         const xClamped = Math.max(0, Math.min(colsCount - 1, x));
         const yClamped = Math.max(0, Math.min(rowsCount - 1, y));
@@ -457,110 +540,150 @@ for (const contour of contourSets) {
           age: Math.max(ageBase, Math.min(maxAge, ageRaw)),
         };
       });
-      const snapped = resampleToYearTicks(points, years);
-      if (snapped.length >= 2) {
-        const corrected: YearAgePoint[] = [];
-        for (const pt of snapped) {
-          const col = yearToColIndex(pt.year, years);
-          if (col < 0) continue;
-          const crossings = crossingAgesForCol(
+
+      const snapped = resampleToYearTicks(ringPoints, years);
+      let corrected: YearAgePoint[] = [];
+      for (const pt of snapped) {
+        const col = years.indexOf(pt.year);
+        if (col < 0) continue;
+        const crossings = crossingAgesForCol(
+          levelValue,
+          col,
+          ages,
+          values,
+          colsCount
+        );
+        if (crossings.length === 0) continue;
+        const snappedAge = nearest(pt.age, crossings);
+        if (snappedAge == null) continue;
+        corrected.push({ year: pt.year, age: snappedAge });
+      }
+
+      corrected = dedupPoints(corrected);
+      if (corrected.length >= 2) {
+        const first = corrected[0];
+        const last = corrected[corrected.length - 1];
+        if (
+          Math.abs(first.year - last.year) < 1e-9 &&
+          Math.abs(first.age - last.age) < 1e-9
+        ) {
+          corrected.pop();
+        }
+      }
+      corrected = rotateToMinYear(corrected);
+      corrected = extendByColumnCrossings(
+        corrected,
+        levelValue,
+        years,
+        ages,
+        values,
+        colsCount
+      );
+
+      if (corrected.length >= 2) {
+        const eps = 1e-6;
+        const yearMin = years[0];
+        const minYearInLine = Math.min(...corrected.map((p) => p.year));
+        const wantsLeft = minYearInLine <= yearMin + yearStep + eps;
+        if (wantsLeft) {
+          const leftCross = crossingAgesForCol(
             levelValue,
-            col,
+            0,
             ages,
             values,
             colsCount
           );
-          if (crossings.length === 0) continue;
-          corrected.push({
-            year: pt.year,
-            age: nearest(pt.age, crossings),
-          });
-        }
-        if (corrected.length >= 2) {
-          const eps = 1e-6;
-          const yearMin = years[0];
-          const colMin = 0;
-          const minYearInLine = Math.min(...corrected.map((p) => p.year));
-          const wantsLeft = minYearInLine <= yearMin + yearStep + eps;
-          if (wantsLeft) {
-            const leftCross = crossingAgesForCol(
-              levelValue,
-              colMin,
-              ages,
-              values,
-              colsCount
+          if (leftCross.length > 0) {
+            const firstIdx = corrected.reduce(
+              (bestIdx, p, idx) =>
+                p.year < corrected[bestIdx].year ? idx : bestIdx,
+              0
             );
-            if (leftCross.length > 0) {
-              const firstIdx = corrected.reduce(
-                (bestIdx, p, idx) =>
-                  p.year < corrected[bestIdx].year ? idx : bestIdx,
-                0
-              );
-              const targetAge = corrected[firstIdx].age;
-              const chosenAge = nearest(targetAge, leftCross);
+            const targetAge = corrected[firstIdx].age;
+            const chosenAge = nearest(targetAge, leftCross);
+            if (chosenAge != null) {
               const alreadyHas = corrected.some(
-                (p) => p.year === yearMin && Math.abs(p.age - chosenAge) < 1e-6
+                (p) =>
+                  p.year === yearMin && Math.abs(p.age - chosenAge) < 1e-6
               );
               if (!alreadyHas) {
                 corrected.unshift({ year: yearMin, age: chosenAge });
               }
             }
           }
-          if (corrected.length >= 2) {
-            const level = levelValue;
-            const first = corrected[0];
-            const firstCol = years.indexOf(first.year);
-            if (firstCol > 0) {
-              const yFrac = fractionalYearBetweenCols(
-                level,
-                firstCol - 1,
-                firstCol,
-                first.age,
-                years,
-                ages,
-                values,
-                colsCount
-              );
-              if (yFrac != null) {
-                corrected[0] = { year: yFrac, age: first.age };
-              }
-            }
-
-            const last = corrected[corrected.length - 1];
-            const lastCol = years.indexOf(last.year);
-            if (lastCol >= 0 && lastCol < years.length - 1) {
-              const yFrac = fractionalYearBetweenCols(
-                level,
-                lastCol,
-                lastCol + 1,
-                last.age,
-                years,
-                ages,
-                values,
-                colsCount
-              );
-              if (yFrac != null) {
-                corrected[corrected.length - 1] = {
-                  year: yFrac,
-                  age: last.age,
-                };
-              }
-            }
-            jsonReady.push({ level: levelValue, points: corrected });
-          }
         }
+      }
+
+      if (corrected.length >= 2) {
+        corrected[0] = adjustEndpointToBoundary(
+          corrected[0],
+          levelValue,
+          years,
+          ages,
+          values,
+          colsCount
+        );
+        corrected[corrected.length - 1] = adjustEndpointToBoundary(
+          corrected[corrected.length - 1],
+          levelValue,
+          years,
+          ages,
+          values,
+          colsCount
+        );
+
+        corrected = corrected.filter(
+          (p) => Number.isFinite(p.year) && Number.isFinite(p.age)
+        );
+        corrected = dedupPoints(corrected);
+
+        const runs = splitByYearDirection(corrected);
+        const best = pickBestRun(runs);
+        if (!best || best.length < 2) continue;
+        corrected = best;
+
+        let flips = 0;
+        let prevSign = 0;
+        for (let i = 1; i < corrected.length; i++) {
+          const dy = corrected[i].year - corrected[i - 1].year;
+          const s = Math.sign(dy);
+          if (s !== 0 && prevSign !== 0 && s !== prevSign) flips++;
+          if (s !== 0) prevSign = s;
+        }
+        if (flips > 0) {
+          throw new Error(
+            `Contour still flips year direction at level=${levelValue} flips=${flips}`
+          );
+        }
+
+        jsonReady.push({ level: levelValue, points: corrected });
       }
     }
   }
 }
 
-// --- 7. Write to disk ---
+/* ---------- VALIDATION + WRITE JSON ---------- */
 
-fs.writeFileSync(contoursOutPath, JSON.stringify(jsonReady, null, 2), "utf8");
+for (const iso of jsonReady) {
+  for (const p of iso.points) {
+    if (!Number.isFinite(p.year) || !Number.isFinite(p.age)) {
+      throw new Error(
+        `Invalid contour point at level=${iso.level}: ${JSON.stringify(p)}`
+      );
+    }
+  }
+}
+
+const serialized = JSON.stringify(jsonReady, null, 2);
+if (serialized.includes('"age": null')) {
+  throw new Error("Found age:null in output; NaN leaked into JSON.");
+}
+
+fs.writeFileSync(contoursOutPath, serialized, "utf8");
 
 console.log(
   `Wrote ${jsonReady.length} contour levels to ${path.relative(
     process.cwd(),
     contoursOutPath
-  )} (maxSurvivors=${maxSurvivors}, step=1_000_000)`
+  )} (maxSurvivors=${maxSurvivors}, step=${levelStep})`
 );
