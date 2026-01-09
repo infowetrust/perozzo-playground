@@ -75,6 +75,7 @@ const DEFAULT_VALUE_LEVELS = {
   backwallFull: [0, 50_000, 100_000, 150_000],
   backwallRightOnly: [200_000, 250_000],
 };
+const DEBUG_COHORT_ON_TOP = true;
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
@@ -236,6 +237,8 @@ type Quad2D = {
   points2D: Point2D[];
   depth: number;
   corners3D: Point3D[];
+  rowIndex: number;
+  colIndex: number;
 };
 
 type YearLine = {
@@ -256,13 +259,48 @@ type CohortLine = {
   indices: number[];
   heavy: boolean;
 };
-type ValueContour2D = { level: number; points: Point2D[] };
+type ValueContour2D = {
+  level: number;
+  points: Point2D[];
+  data: { year: number; age: number }[];
+};
 type KissPair = {
   level: number;
   age: number;
   surface: Point2D;
   wall: Point2D;
   dist: number;
+};
+type CohortSegment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  heavy: boolean;
+  birthYear: number;
+};
+type YearSegment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  heavy: boolean;
+  year: number;
+};
+type AgeSegment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  heavy: boolean;
+  age: number;
+};
+type ValueSegment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  level: number;
 };
 
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
@@ -372,6 +410,8 @@ function buildQuads(
         points2D: corners2D,
         depth,
         corners3D,
+        rowIndex: y,
+        colIndex: x,
       });
     }
   }
@@ -475,6 +515,7 @@ function buildValueContours2D(
 ): ValueContour2D[] {
   return contours.map((iso) => {
     const pts: Point2D[] = [];
+    const dataPts: { year: number; age: number }[] = [];
 
     const contourPts = iso.points;
 
@@ -552,11 +593,13 @@ function buildValueContours2D(
       const y = q0y + ta * (q1y - q0y);
 
       pts.push({ x, y });
+      dataPts.push({ year: pt.year, age: pt.age });
     }
 
     return {
       level: iso.level,
       points: pts,
+      data: dataPts,
     };
   });
 }
@@ -779,6 +822,89 @@ export default function PlateViz({
       rows,
       cols
     );
+    const yearSegByQuad = new Map<string, YearSegment[]>();
+    for (const line of yearLines) {
+      const col = years.indexOf(line.year);
+      if (col === -1) continue;
+      const qc = Math.min(col, cols - 2);
+      for (let row = 0; row < rows - 1; row++) {
+        const p0 = line.points[row];
+        const p1 = line.points[row + 1];
+        if (!p0 || !p1) continue;
+        const key = `${row}-${qc}`;
+        const seg: YearSegment = {
+          x1: p0.x,
+          y1: p0.y,
+          x2: p1.x,
+          y2: p1.y,
+          heavy: line.heavy,
+          year: line.year,
+        };
+        const bucket = yearSegByQuad.get(key);
+        if (bucket) {
+          bucket.push(seg);
+        } else {
+          yearSegByQuad.set(key, [seg]);
+        }
+      }
+    }
+    const ageSegByQuad = new Map<string, AgeSegment[]>();
+    for (const line of ageLines) {
+      const row = ages.indexOf(line.age);
+      if (row < 0) continue;
+      const qr = Math.min(row, rows - 2);
+      for (let col = 0; col < cols - 1; col++) {
+        const p0 = line.points[col];
+        const p1 = line.points[col + 1];
+        if (!p0 || !p1) continue;
+        const key = `${qr}-${col}`;
+        const seg: AgeSegment = {
+          x1: p0.x,
+          y1: p0.y,
+          x2: p1.x,
+          y2: p1.y,
+          heavy: line.heavy,
+          age: line.age,
+        };
+        const bucket = ageSegByQuad.get(key);
+        if (bucket) {
+          bucket.push(seg);
+        } else {
+          ageSegByQuad.set(key, [seg]);
+        }
+      }
+    }
+    const cohortSegByQuad = new Map<string, CohortSegment[]>();
+    for (const line of cohortLines) {
+      if (!line.indices || line.indices.length !== line.points.length) continue;
+      for (let i = 0; i < line.points.length - 1; i++) {
+        const idx0 = line.indices[i];
+        const idx1 = line.indices[i + 1];
+        const r0 = Math.floor(idx0 / cols);
+        const c0 = idx0 % cols;
+        const r1 = Math.floor(idx1 / cols);
+        const c1 = idx1 % cols;
+        const qr = Math.min(r0, r1);
+        const qc = Math.min(c0, c1);
+        const key = `${qr}-${qc}`;
+        const p0 = line.points[i];
+        const p1 = line.points[i + 1];
+        const seg: CohortSegment = {
+          x1: p0.x,
+          y1: p0.y,
+          x2: p1.x,
+          y2: p1.y,
+          heavy: line.heavy,
+          birthYear: line.birthYear,
+        };
+        const bucket = cohortSegByQuad.get(key);
+        if (bucket) {
+          bucket.push(seg);
+        } else {
+          cohortSegByQuad.set(key, [seg]);
+        }
+      }
+    }
     const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
     const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
     const contourPolylines2D = buildValueContours2D(
@@ -791,6 +917,59 @@ export default function PlateViz({
       cols,
       zScale
     );
+    const valueSegByQuad = new Map<string, ValueSegment[]>();
+    const ageStep = ages.length > 1 ? ages[1] - ages[0] : 0;
+    for (const iso of contourPolylines2D) {
+      const pts = iso.points;
+      const data = iso.data;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p0 = pts[i];
+        const p1 = pts[i + 1];
+        const d0 = data[i];
+        const d1 = data[i + 1];
+        if (!p0 || !p1 || !d0 || !d1) continue;
+        const midYear = (d0.year + d1.year) / 2;
+        const qc = findColSegmentIndex(midYear, years);
+        if (qc < 0 || ageStep <= 0) continue;
+        const a0 = d0.age;
+        const a1 = d1.age;
+        const tBreaks: number[] = [];
+        if (a0 !== a1) {
+          const minA = Math.min(a0, a1);
+          const maxA = Math.max(a0, a1);
+          const startK = Math.ceil(minA / ageStep);
+          const endK = Math.floor(maxA / ageStep);
+          for (let k = startK; k <= endK; k++) {
+            const ageLine = k * ageStep;
+            if (ageLine <= minA || ageLine >= maxA) continue;
+            const t = (ageLine - a0) / (a1 - a0);
+            if (t > 0 && t < 1) tBreaks.push(t);
+          }
+          tBreaks.sort((a, b) => a - b);
+        }
+        const tAll = [0, ...tBreaks, 1];
+        for (let s = 0; s < tAll.length - 1; s++) {
+          const t0 = tAll[s];
+          const t1 = tAll[s + 1];
+          const midT = (t0 + t1) / 2;
+          const midAge = a0 + (a1 - a0) * midT;
+          const qr = findRowSegmentIndex(midAge, ages);
+          if (qr < 0) continue;
+          const x1 = p0.x + (p1.x - p0.x) * t0;
+          const y1 = p0.y + (p1.y - p0.y) * t0;
+          const x2 = p0.x + (p1.x - p0.x) * t1;
+          const y2 = p0.y + (p1.y - p0.y) * t1;
+          const key = `${qr}-${qc}`;
+          const seg: ValueSegment = { x1, y1, x2, y2, level: iso.level };
+          const bucket = valueSegByQuad.get(key);
+          if (bucket) {
+            bucket.push(seg);
+          } else {
+            valueSegByQuad.set(key, [seg]);
+          }
+        }
+      }
+    }
     return {
       surfacePoints,
       rows,
@@ -809,6 +988,10 @@ export default function PlateViz({
       yearLines,
       ageLines,
       cohortLines,
+      yearSegByQuad,
+      ageSegByQuad,
+      cohortSegByQuad,
+      valueSegByQuad,
       contourPolylines2D,
       maxZ,
     };
@@ -1068,6 +1251,31 @@ export default function PlateViz({
     },
     debugPoints: vizStyle.debugPoints,
   };
+  const surfaceClipId = "surfaceClip";
+  const silhouettePointsStr = model.silhouettePts
+    .map((p) => `${p.x},${p.y}`)
+    .join(" ");
+  const leftEdgePts: Point2D[] = [];
+  const rightEdgePts: Point2D[] = [];
+  const topEdgePts: Point2D[] = [];
+  const bottomEdgePts: Point2D[] = [];
+  for (let row = 0; row < model.rows; row++) {
+    const left = model.projectedSurface[row * model.cols];
+    const right = model.projectedSurface[row * model.cols + (model.cols - 1)];
+    if (left) leftEdgePts.push(left);
+    if (right) rightEdgePts.push(right);
+  }
+  for (let col = 0; col < model.cols; col++) {
+    const top = model.projectedSurface[col];
+    const bottom =
+      model.projectedSurface[(model.rows - 1) * model.cols + col];
+    if (top) topEdgePts.push(top);
+    if (bottom) bottomEdgePts.push(bottom);
+  }
+  const leftEdgeStr = leftEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
+  const rightEdgeStr = rightEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
+  const topEdgeStr = topEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
+  const bottomEdgeStr = bottomEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
   const titleProps = {
     x: titlePos.x + 125,
     y: titlePos.y + 130,
@@ -1157,16 +1365,88 @@ export default function PlateViz({
               />
             )}
             {layersEnabled.surface && (
-              <SurfaceLayer
-                quads={model.quads}
-                surfaceStyle={{
-                  fill: vizStyle.surface.fill,
-                  stroke: vizStyle.surface.stroke,
-                  strokeWidth: vizStyle.surface.strokeWidth,
-                }}
-                shading={shadingConfig}
-                lightDir={lightDir}
+              <>
+                <SurfaceLayer
+                  quads={model.quads}
+                  surfaceStyle={{
+                    fill: vizStyle.surface.fill,
+                    stroke: vizStyle.surface.stroke,
+                    strokeWidth: vizStyle.surface.strokeWidth,
+                  }}
+                  shading={shadingConfig}
+                  lightDir={lightDir}
+                  drawSegments={false}
+                  yearSegByQuad={model.yearSegByQuad}
+                  yearStyle={vizStyle.years}
+                  ageSegByQuad={model.ageSegByQuad}
+                  ageStyle={vizStyle.ages}
+                valueSegByQuad={model.valueSegByQuad}
+                valueStyle={linesVizStyle.values}
+                cohortSegByQuad={
+                  DEBUG_COHORT_ON_TOP ? undefined : model.cohortSegByQuad
+                }
+                cohortStyle={vizStyle.cohorts}
               />
+                <g>
+                  <SurfaceLayer
+                    quads={model.quads}
+                    surfaceStyle={{
+                      fill: vizStyle.surface.fill,
+                      stroke: vizStyle.surface.stroke,
+                      strokeWidth: vizStyle.surface.strokeWidth,
+                    }}
+                    shading={shadingConfig}
+                    lightDir={lightDir}
+                    drawQuads={false}
+                    yearSegByQuad={model.yearSegByQuad}
+                    yearStyle={vizStyle.years}
+                    ageSegByQuad={model.ageSegByQuad}
+                    ageStyle={vizStyle.ages}
+                    valueSegByQuad={model.valueSegByQuad}
+                    valueStyle={linesVizStyle.values}
+                    cohortSegByQuad={model.cohortSegByQuad}
+                    cohortStyle={vizStyle.cohorts}
+                  />
+                </g>
+                <g id="surface-boundary">
+                  <polyline
+                    points={leftEdgeStr}
+                    fill="none"
+                    stroke={vizStyle.years.stroke}
+                    strokeWidth={vizStyle.years.thickWidth}
+                    strokeOpacity={vizStyle.years.thickOpacity}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <polyline
+                    points={rightEdgeStr}
+                    fill="none"
+                    stroke={vizStyle.years.stroke}
+                    strokeWidth={vizStyle.years.thickWidth}
+                    strokeOpacity={vizStyle.years.thickOpacity}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <polyline
+                    points={topEdgeStr}
+                    fill="none"
+                    stroke={vizStyle.ages.stroke}
+                    strokeWidth={vizStyle.ages.thickWidth}
+                    strokeOpacity={vizStyle.ages.thickOpacity}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <polyline
+                    points={bottomEdgeStr}
+                    fill="none"
+                    stroke={vizStyle.ages.stroke}
+                    strokeWidth={vizStyle.ages.thickWidth}
+                    strokeOpacity={vizStyle.ages.thickOpacity}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </g>
+              </>
             )}
             {layersEnabled.lines && (
               <DataLinesLayer
@@ -1181,7 +1461,10 @@ export default function PlateViz({
                   highlightMult: HOVER_HIGHLIGHT_MULT,
                   dimMult: HOVER_DIM_MULT,
                 }}
-                showCohortLines={layersEnabled.cohortLines}
+                drawValues={false}
+                drawAges={false}
+                drawYears={false}
+                showCohortLines={DEBUG_COHORT_ON_TOP}
                 depthBuffer={depthBuffer}
                 occlusion={OCCLUSION}
                 surfacePoints={model.surfacePoints}

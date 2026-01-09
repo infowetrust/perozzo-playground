@@ -35,6 +35,9 @@ type DataLinesLayerProps = {
   showCohortLines: boolean;
   focus?: { year: number; age: number; birthYear: number } | null;
   hoverOpacity?: { highlightMult: number; dimMult: number };
+  drawYears?: boolean;
+  drawAges?: boolean;
+  drawValues?: boolean;
 
   // Optional occlusion (safe if not provided)
   depthBuffer?: DepthBuffer;
@@ -56,6 +59,9 @@ export default function DataLinesLayer({
   showCohortLines,
   focus,
   hoverOpacity,
+  drawYears = true,
+  drawAges = true,
+  drawValues = true,
   depthBuffer,
   occlusion,
   surfacePoints,
@@ -123,23 +129,25 @@ export default function DataLinesLayer({
   return (
     <g id="layer-lines">
       {/* GREEN surface value isolines */}
-      <g>
-        {contourPolylines2D.map((iso, i) => {
-          const heavy = isHeavy(iso.level, vizStyle.values.heavyStep);
-          return (
-            <polyline
-              key={`val-${iso.level}-${i}`}
-              points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke={vizStyle.values.stroke}
-              strokeWidth={heavy ? vizStyle.values.thickWidth : vizStyle.values.thinWidth}
-              strokeOpacity={heavy ? vizStyle.values.thickOpacity : vizStyle.values.thinOpacity}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          );
-        })}
-      </g>
+      {drawValues && (
+        <g>
+          {contourPolylines2D.map((iso, i) => {
+            const heavy = isHeavy(iso.level, vizStyle.values.heavyStep);
+            return (
+              <polyline
+                key={`val-${iso.level}-${i}`}
+                points={iso.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={vizStyle.values.stroke}
+                strokeWidth={heavy ? vizStyle.values.thickWidth : vizStyle.values.thinWidth}
+                strokeOpacity={heavy ? vizStyle.values.thickOpacity : vizStyle.values.thinOpacity}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            );
+          })}
+        </g>
+      )}
 
       {/* BLUE cohort lines */}
       {showCohortLines &&
@@ -170,56 +178,58 @@ export default function DataLinesLayer({
         })}
 
       {/* GRAY age lines */}
-      {ageLines.map((line) => {
-        const isHit = !!(focus && line.age === focus.age);
-        const width = line.heavy ? vizStyle.ages.thickWidth : vizStyle.ages.thinWidth;
-        const opBase = line.heavy ? vizStyle.ages.thickOpacity : vizStyle.ages.thinOpacity;
-        if (occlEnabled && line.indices && surfacePoints) {
+      {drawAges &&
+        ageLines.map((line) => {
+          const isHit = !!(focus && line.age === focus.age);
+          const width = line.heavy ? vizStyle.ages.thickWidth : vizStyle.ages.thinWidth;
+          const opBase = line.heavy ? vizStyle.ages.thickOpacity : vizStyle.ages.thinOpacity;
+          if (occlEnabled && line.indices && surfacePoints) {
+            return (
+              <g key={`age-${line.age}`}>
+                {renderPolylineAsSegments(line, vizStyle.ages.stroke, width, opBase, isHit)}
+              </g>
+            );
+          }
           return (
-            <g key={`age-${line.age}`}>
-              {renderPolylineAsSegments(line, vizStyle.ages.stroke, width, opBase, isHit)}
-            </g>
+            <polyline
+              key={`age-${line.age}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.ages.stroke}
+              strokeWidth={width}
+              strokeOpacity={applyHover(opBase, isHit)}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           );
-        }
-        return (
-          <polyline
-            key={`age-${line.age}`}
-            points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke={vizStyle.ages.stroke}
-            strokeWidth={width}
-            strokeOpacity={applyHover(opBase, isHit)}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        );
-      })}
+        })}
 
       {/* RED year lines */}
-      {yearLines.map((line) => {
-        const isHit = !!(focus && line.year === focus.year);
-        const width = line.heavy ? vizStyle.years.thickWidth : vizStyle.years.thinWidth;
-        const opBase = line.heavy ? vizStyle.years.thickOpacity : vizStyle.years.thinOpacity;
-        if (occlEnabled && line.indices && surfacePoints) {
+      {drawYears &&
+        yearLines.map((line) => {
+          const isHit = !!(focus && line.year === focus.year);
+          const width = line.heavy ? vizStyle.years.thickWidth : vizStyle.years.thinWidth;
+          const opBase = line.heavy ? vizStyle.years.thickOpacity : vizStyle.years.thinOpacity;
+          if (occlEnabled && line.indices && surfacePoints) {
+            return (
+              <g key={`year-${line.year}`}>
+                {renderPolylineAsSegments(line, vizStyle.years.stroke, width, opBase, isHit)}
+              </g>
+            );
+          }
           return (
-            <g key={`year-${line.year}`}>
-              {renderPolylineAsSegments(line, vizStyle.years.stroke, width, opBase, isHit)}
-            </g>
+            <polyline
+              key={`year-${line.year}`}
+              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+              stroke={vizStyle.years.stroke}
+              strokeWidth={width}
+              strokeOpacity={applyHover(opBase, isHit)}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           );
-        }
-        return (
-          <polyline
-            key={`year-${line.year}`}
-            points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
-            fill="none"
-            stroke={vizStyle.years.stroke}
-            strokeWidth={width}
-            strokeOpacity={applyHover(opBase, isHit)}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        );
-      })}
+        })}
 
       {/* debug grid points */}
       {projectedSurface.map((p, i) => (
