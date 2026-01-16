@@ -10,8 +10,16 @@ type Quad = {
   colIndex: number;
 };
 
+type Triangle = {
+  pts2: [Point2D, Point2D, Point2D];
+  pts3: [Point3D, Point3D, Point3D];
+  depthKey: number;
+  cellKey: string;
+};
+
 type SurfaceLayerProps = {
   quads: Quad[];
+  triangles?: Triangle[];
   surfaceStyle: {
     fill: string;
     stroke: string;
@@ -90,6 +98,7 @@ type SurfaceLayerProps = {
 
 export default function SurfaceLayer({
   quads,
+  triangles,
   surfaceStyle,
   shading,
   lightDir,
@@ -104,10 +113,25 @@ export default function SurfaceLayer({
   drawQuads = true,
   drawSegments = true,
 }: SurfaceLayerProps) {
+  const useTriangles = Boolean(triangles && triangles.length > 0);
+  const drawQuadFill = drawQuads && !useTriangles;
   return (
     <g id="layer-surface">
+      {drawQuads && useTriangles && triangles && (
+        <g id="layer-surface-tris">
+          {triangles.map((tri, i) => (
+            <polygon
+              key={`tri-${tri.cellKey}-${i}`}
+              points={tri.pts2.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill={surfaceStyle.fill}
+              stroke={surfaceStyle.stroke}
+              strokeWidth={surfaceStyle.strokeWidth}
+            />
+          ))}
+        </g>
+      )}
       {quads.map((quad, i) => {
-        const base = drawQuads ? (
+        const base = drawQuadFill ? (
           <polygon
             points={quad.points2D.map((p) => `${p.x},${p.y}`).join(" ")}
             fill={surfaceStyle.fill}
@@ -214,8 +238,13 @@ export default function SurfaceLayer({
                 />
               ))
             : null;
+        const hasSegments =
+          renderYearSegs ||
+          renderAgeSegs ||
+          renderValueSegs ||
+          renderCohortSegs;
 
-        if (drawQuads && !shading.enabled) {
+        if (drawQuadFill && !shading.enabled) {
           return (
             <g key={`quad-${i}`}>
               {base}
@@ -227,15 +256,8 @@ export default function SurfaceLayer({
           );
         }
 
-        if (!drawQuads) {
-          if (
-            !renderYearSegs &&
-            !renderAgeSegs &&
-            !renderValueSegs &&
-            !renderCohortSegs
-          ) {
-            return null;
-          }
+        if (!drawQuads || !drawQuadFill) {
+          if (!hasSegments) return null;
           return (
             <g key={`quad-${i}`}>
               {renderYearSegs}

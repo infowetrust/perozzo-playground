@@ -48,3 +48,12 @@ export type ShadingConfig = {
     floor: number;
   };
 };
+
+export const TRI_RENDER = {
+  enabled: true,
+  backfaceCull: true,
+  sortMetric: "maxY" as const,
+  // Skip triangles that are nearly edge-on / slivers in screen space.
+  // Larger = more aggressive culling (fewer spikes but may remove facets).
+  degenerateAreaEps: 8,
+};

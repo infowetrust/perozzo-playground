@@ -35,7 +35,7 @@ import {
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import { makeFrame3D } from "../core/frame3d";
-import { HOVER_HIGHLIGHT_MULT, HOVER_DIM_MULT } from "./vizConfig";
+import { HOVER_HIGHLIGHT_MULT, HOVER_DIM_MULT, TRI_RENDER } from "./vizConfig";
 
 type ContourPointFile = { year: number; age: number };
 type ContourFile = { level: number; points: ContourPointFile[] };
@@ -236,6 +236,7 @@ const TOOLTIP_STYLE = {
 type Quad2D = {
   points2D: Point2D[];
   depth: number;
+  depth2D: number;
   corners3D: Point3D[];
   rowIndex: number;
   colIndex: number;
@@ -303,7 +304,49 @@ type ValueSegment = {
   level: number;
 };
 
+type RenderMode = "normal" | "debugQuads" | "debugTris";
+type TriDiagMode = "fixedA" | "fixedB" | "autoBest";
+type DebugReveal = "first" | "last";
+type TriSortMetric = "avgY" | "maxY";
+
+type Vec3 = { x: number; y: number; z: number };
+
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
+
+function sub3(a: Point3D, b: Point3D): Vec3 {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+function cross3(u: Vec3, v: Vec3): Vec3 {
+  return {
+    x: u.y * v.z - u.z * v.y,
+    y: u.z * v.x - u.x * v.z,
+    z: u.x * v.y - u.y * v.x,
+  };
+}
+function norm3(v: Vec3): number {
+  return Math.hypot(v.x, v.y, v.z) || 1;
+}
+function normalizeV3(v: Vec3): Vec3 {
+  const n = norm3(v);
+  return { x: v.x / n, y: v.y / n, z: v.z / n };
+}
+function triNormal(a: Point3D, b: Point3D, c: Point3D): Vec3 {
+  const u = sub3(b, a);
+  const v = sub3(c, a);
+  return normalizeV3(cross3(u, v));
+}
+function dot3(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+function triArea2(a: Point2D, b: Point2D, c: Point2D): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+function avg3(a: Point2D, b: Point2D, c: Point2D): Point2D {
+  return { x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3 };
+}
+function triDepthKeyMaxY(a: Point2D, b: Point2D, c: Point2D): number {
+  return Math.max(a.y, b.y, c.y);
+}
 
 // simple depth metric: larger = nearer to viewer
 function pointDepth3D(p: Point3D): number {
@@ -401,6 +444,12 @@ function buildQuads(
       const corners2D: Point2D[] = corners3D.map((p) =>
         projectIso(p, projection)
       );
+      const depth2D =
+        (corners2D[0].y +
+          corners2D[1].y +
+          corners2D[2].y +
+          corners2D[3].y) /
+        4;
 
       const depth =
         corners3D.reduce((sum, p) => sum + pointDepth3D(p), 0) /
@@ -409,6 +458,7 @@ function buildQuads(
       quads.push({
         points2D: corners2D,
         depth,
+        depth2D,
         corners3D,
         rowIndex: y,
         colIndex: x,
@@ -417,7 +467,23 @@ function buildQuads(
   }
 
   // painter's algorithm: draw far → near
-  quads.sort((a, b) => a.depth - b.depth);
+  quads.sort((a, b) => {
+    if (a.depth2D !== b.depth2D) return a.depth2D - b.depth2D;
+    const ax =
+      (a.points2D[0].x +
+        a.points2D[1].x +
+        a.points2D[2].x +
+        a.points2D[3].x) /
+      4;
+    const bx =
+      (b.points2D[0].x +
+        b.points2D[1].x +
+        b.points2D[2].x +
+        b.points2D[3].x) /
+      4;
+    if (ax !== bx) return ax - bx;
+    return (a.depth ?? 0) - (b.depth ?? 0);
+  });
   return quads;
 }
 
@@ -715,6 +781,13 @@ export default function PlateViz({
     screenX: number;
     screenY: number;
   }>(null);
+  const [renderMode, setRenderMode] = useState<RenderMode>("normal");
+  const [debugQuadCount, setDebugQuadCount] = useState<number>(300);
+  const [triDiagMode, setTriDiagMode] = useState<TriDiagMode>("autoBest");
+  const [debugReveal, setDebugReveal] = useState<DebugReveal>("first");
+  const [triSortMetric, setTriSortMetric] = useState<TriSortMetric>("maxY");
+  const [triBackfaceCull, setTriBackfaceCull] = useState<boolean>(true);
+  const DEBUG_TRI_STROKE_WIDTH = 0.4;
 
   const datasetTitleKey = title?.bigWord?.toUpperCase() ?? "";
   const normalizedKey = activeKey?.toLowerCase();
@@ -812,6 +885,72 @@ export default function PlateViz({
       cols
     );
     const quads = buildQuads(surfacePoints, rows, cols, projection);
+    const triangles = TRI_RENDER.enabled
+      ? (() => {
+          const tris: {
+            pts2: [Point2D, Point2D, Point2D];
+            pts3: [Point3D, Point3D, Point3D];
+            depthKey: number;
+            cellKey: string;
+            cx: number;
+            cy: number;
+          }[] = [];
+          for (const quad of quads) {
+            const [p00, p10, p11, p01] = quad.corners3D;
+            const [P00, P10, P11, P01] = quad.points2D;
+            const nA1 = triNormal(p00, p10, p11);
+            const nA2 = triNormal(p00, p11, p01);
+            const scoreA = dot3(nA1, nA2);
+            const nB1 = triNormal(p00, p10, p01);
+            const nB2 = triNormal(p10, p11, p01);
+            const scoreB = dot3(nB1, nB2);
+            const useA = scoreA >= scoreB;
+            const candidates = useA
+              ? [
+                  {
+                    pts2: [P00, P10, P11] as [Point2D, Point2D, Point2D],
+                    pts3: [p00, p10, p11] as [Point3D, Point3D, Point3D],
+                  },
+                  {
+                    pts2: [P00, P11, P01] as [Point2D, Point2D, Point2D],
+                    pts3: [p00, p11, p01] as [Point3D, Point3D, Point3D],
+                  },
+                ]
+              : [
+                  {
+                    pts2: [P00, P10, P01] as [Point2D, Point2D, Point2D],
+                    pts3: [p00, p10, p01] as [Point3D, Point3D, Point3D],
+                  },
+                  {
+                    pts2: [P10, P11, P01] as [Point2D, Point2D, Point2D],
+                    pts3: [p10, p11, p01] as [Point3D, Point3D, Point3D],
+                  },
+                ];
+            for (const tri of candidates) {
+              const [a, b, c] = tri.pts2;
+              const area2 = triArea2(a, b, c);
+              if (Math.abs(area2) < TRI_RENDER.degenerateAreaEps) {
+                continue;
+              }
+              if (TRI_RENDER.backfaceCull && area2 <= 0) {
+                continue;
+              }
+              const depthKey = triDepthKeyMaxY(a, b, c);
+              const centroid = avg3(a, b, c);
+              tris.push({
+                pts2: tri.pts2,
+                pts3: tri.pts3,
+                depthKey,
+                cellKey: `${quad.rowIndex}-${quad.colIndex}`,
+                cx: centroid.x,
+                cy: centroid.y,
+              });
+            }
+          }
+          tris.sort((a, b) => a.depthKey - b.depthKey);
+          return tris;
+        })()
+      : [];
     const yearLines = buildYearLines(projectedSurface, years, rows, cols);
     const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
     const cohortLines = buildCohortLines(
@@ -985,6 +1124,7 @@ export default function PlateViz({
       floorPoints,
       silhouettePts,
       quads,
+      triangles,
       yearLines,
       ageLines,
       cohortLines,
@@ -1302,19 +1442,145 @@ export default function PlateViz({
       }}
     >
       {showUI && (
-        <button
-          type="button"
-          onClick={handleDownloadSvg}
+        <div
           style={{
-            marginBottom: "0.5rem",
-            padding: "0.4rem 0.8rem",
-            fontFamily: "inherit",
-            fontSize: "0.9rem",
-            cursor: "pointer",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+            alignItems: "flex-end",
+            marginBottom: "0.75rem",
           }}
         >
-          Download SVG
-        </button>
+          <button
+            type="button"
+            onClick={handleDownloadSvg}
+            style={{
+              padding: "0.4rem 0.8rem",
+              fontFamily: "inherit",
+              fontSize: "0.9rem",
+              cursor: "pointer",
+            }}
+          >
+            Download SVG
+          </button>
+          <label
+            style={{
+              display: "inline-flex",
+              flexDirection: "column",
+              gap: "0.25rem",
+            }}
+            >
+              Render mode
+            <select
+              value={renderMode}
+              onChange={(e) =>
+                setRenderMode(e.target.value as RenderMode)
+              }
+            >
+              <option value="normal">Normal</option>
+              <option value="debugQuads">Debug: quad order</option>
+              <option value="debugTris">Debug: triangle order</option>
+            </select>
+          </label>
+          {renderMode === "debugTris" && (
+            <label
+              style={{
+                display: "inline-flex",
+                flexDirection: "column",
+                gap: "0.25rem",
+              }}
+            >
+              Triangle diagonal
+              <select
+                value={triDiagMode}
+                onChange={(e) =>
+                  setTriDiagMode(e.target.value as TriDiagMode)
+                }
+              >
+                <option value="autoBest">autoBest (least warp)</option>
+                <option value="fixedA">fixedA (p00→p11)</option>
+                <option value="fixedB">fixedB (p10→p01)</option>
+              </select>
+            </label>
+          )}
+          {renderMode === "debugTris" && (
+            <label
+              style={{
+                display: "inline-flex",
+                flexDirection: "column",
+                gap: "0.25rem",
+              }}
+            >
+              Reveal
+              <select
+                value={debugReveal}
+                onChange={(e) =>
+                  setDebugReveal(e.target.value as DebugReveal)
+                }
+              >
+                <option value="first">First N (back → front)</option>
+                <option value="last">Last N (front-most only)</option>
+              </select>
+            </label>
+          )}
+          {renderMode === "debugTris" && (
+            <>
+              <label
+                style={{
+                  display: "inline-flex",
+                  flexDirection: "column",
+                  gap: "0.25rem",
+                }}
+              >
+                Tri sort metric
+                <select
+                  value={triSortMetric}
+                  onChange={(e) =>
+                    setTriSortMetric(e.target.value as TriSortMetric)
+                  }
+                >
+                  <option value="maxY">maxY (near-most priority)</option>
+                  <option value="avgY">avgY (average depth)</option>
+                </select>
+              </label>
+              <label
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "0.5rem",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={triBackfaceCull}
+                  onChange={(e) => setTriBackfaceCull(e.target.checked)}
+                />
+                Backface cull
+              </label>
+            </>
+          )}
+          {(renderMode === "debugQuads" ||
+            renderMode === "debugTris") && (
+            <label
+              style={{
+                display: "inline-flex",
+                flexDirection: "column",
+                gap: "0.25rem",
+              }}
+            >
+              Quads drawn: {debugQuadCount}
+              <input
+                type="range"
+                min={0}
+                max={model.quads.length}
+                value={Math.min(debugQuadCount, model.quads.length)}
+                onChange={(e) =>
+                  setDebugQuadCount(Number(e.target.value))
+                }
+              />
+            </label>
+          )}
+        </div>
       )}
       <div
         style={{
@@ -1332,178 +1598,277 @@ export default function PlateViz({
             background: vizStyle.svg.background,
             display: "block",
           }}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
+          onMouseMove={renderMode === "normal" ? handleMouseMove : undefined}
+          onMouseLeave={renderMode === "normal" ? handleMouseLeave : undefined}
         >
           <g transform={`translate(${offsetX}, ${offsetY})`}>
-            {layersEnabled.architecture && (
-              <ArchitectureLayer
-                frame={model.frame}
-                projection={projection}
-                minYearExt={model.minYearExt}
-                maxYearExt={model.maxYearExt}
-                extendLeftYears={EXTEND_LEFT_YEARS}
-                extendRightYears={EXTEND_RIGHT_YEARS}
-                floorFrameString={floorFrameString}
-                floorAlpha={floorAlpha}
-                shadingInkColor={shadingConfig.inkColor}
-                backWallStyle={backWallStyle}
-                backwallFullLevels={valueLevelConfig.backwallFull}
-                backwallRightLevels={valueLevelConfig.backwallRightOnly}
-                floorStyle={floorStyle}
-                floorAgeStyle={floorAgeStyle}
-                rightWallStyle={rightWallStyle}
-                shadingConfig={shadingConfig}
-                surfacePoints={model.surfacePoints}
-                rows={model.rows}
-                cols={model.cols}
-                ages={model.ages}
-                maxSurvivors={model.maxSurvivors}
-                floorZ={FLOOR_DEPTH}
-                valueStep={activeRightWallValueStep}
-                valueMinorStep={activeRightWallMinorStep}
-              />
-            )}
-            {layersEnabled.surface && (
+            {renderMode === "debugQuads" ? (
+              <g id="layer-debug-quads">
+                {model.quads
+                  .slice(
+                    0,
+                    Math.min(debugQuadCount, model.quads.length)
+                  )
+                  .map((quad, i) => (
+                    <polygon
+                      key={`dbg-quad-${i}`}
+                      points={quad.points2D
+                        .map((p) => `${p.x},${p.y}`)
+                        .join(" ")}
+                      fill="none"
+                      stroke="#000"
+                      strokeOpacity={0.35}
+                      strokeWidth={2}
+                    />
+                  ))}
+              </g>
+            ) : renderMode === "debugTris" ? (
+              <g id="layer-debug-tris">
+                {(() => {
+                  const total = model.quads.length;
+                  const n = Math.min(debugQuadCount, total);
+                  const slice =
+                    debugReveal === "first"
+                      ? model.quads.slice(0, n)
+                      : model.quads.slice(Math.max(0, total - n));
+                  const tris: {
+                    pts2: [Point2D, Point2D, Point2D];
+                    depthKey: number;
+                  }[] = [];
+                  for (const quad of slice) {
+                    const [p00, p10, p11, p01] = quad.corners3D;
+                    const [P00, P10, P11, P01] = quad.points2D;
+                    const nA1 = triNormal(p00, p10, p11);
+                    const nA2 = triNormal(p00, p11, p01);
+                    const scoreA = dot3(nA1, nA2);
+                    const nB1 = triNormal(p00, p10, p01);
+                    const nB2 = triNormal(p10, p11, p01);
+                    const scoreB = dot3(nB1, nB2);
+                    const useA =
+                      triDiagMode === "fixedA" ||
+                      (triDiagMode === "autoBest" &&
+                        scoreA >= scoreB);
+                    const candidates: [Point2D, Point2D, Point2D][] = useA
+                      ? [
+                          [P00, P10, P11],
+                          [P00, P11, P01],
+                        ]
+                      : [
+                          [P00, P10, P01],
+                          [P10, P11, P01],
+                        ];
+                    for (const t of candidates) {
+                      const [a, b, c] = t;
+                      if (triBackfaceCull) {
+                        const area = triArea2(a, b, c);
+                        if (area <= 0) continue;
+                      }
+                      const depthKey =
+                        triSortMetric === "maxY"
+                          ? Math.max(a.y, b.y, c.y)
+                          : (a.y + b.y + c.y) / 3;
+                      tris.push({ pts2: t, depthKey });
+                    }
+                  }
+                  tris.sort((u, v) => u.depthKey - v.depthKey);
+                  const trisTotal = tris.length;
+                  return tris.map((tri, triIndex) => {
+                    const t =
+                      trisTotal <= 1 ? 0 : triIndex / (trisTotal - 1);
+                    const gray = Math.round(245 - t * 160);
+                    const fill = `rgb(${gray},${gray},${gray})`;
+                    return (
+                      <polygon
+                        key={`dbg-tri-${triIndex}`}
+                        points={tri.pts2
+                          .map((p) => `${p.x},${p.y}`)
+                          .join(" ")}
+                        fill={fill}
+                        fillOpacity={0.95}
+                        stroke="#000"
+                        strokeOpacity={0.25}
+                        strokeWidth={DEBUG_TRI_STROKE_WIDTH}
+                      />
+                    );
+                  });
+                })()}
+              </g>
+            ) : (
               <>
-                <SurfaceLayer
-                  quads={model.quads}
-                  surfaceStyle={{
-                    fill: vizStyle.surface.fill,
-                    stroke: vizStyle.surface.stroke,
-                    strokeWidth: vizStyle.surface.strokeWidth,
-                  }}
-                  shading={shadingConfig}
-                  lightDir={lightDir}
-                  drawSegments={false}
-                  yearSegByQuad={model.yearSegByQuad}
-                  yearStyle={vizStyle.years}
-                  ageSegByQuad={model.ageSegByQuad}
-                  ageStyle={vizStyle.ages}
-                valueSegByQuad={model.valueSegByQuad}
-                valueStyle={linesVizStyle.values}
-                cohortSegByQuad={
-                  DEBUG_COHORT_ON_TOP ? undefined : model.cohortSegByQuad
-                }
-                cohortStyle={vizStyle.cohorts}
-              />
-                <g>
-                  <SurfaceLayer
-                    quads={model.quads}
-                    surfaceStyle={{
-                      fill: vizStyle.surface.fill,
-                      stroke: vizStyle.surface.stroke,
-                      strokeWidth: vizStyle.surface.strokeWidth,
+                {layersEnabled.architecture && (
+                  <ArchitectureLayer
+                    frame={model.frame}
+                    projection={projection}
+                    minYearExt={model.minYearExt}
+                    maxYearExt={model.maxYearExt}
+                    extendLeftYears={EXTEND_LEFT_YEARS}
+                    extendRightYears={EXTEND_RIGHT_YEARS}
+                    floorFrameString={floorFrameString}
+                    floorAlpha={floorAlpha}
+                    shadingInkColor={shadingConfig.inkColor}
+                    backWallStyle={backWallStyle}
+                    backwallFullLevels={valueLevelConfig.backwallFull}
+                    backwallRightLevels={valueLevelConfig.backwallRightOnly}
+                    floorStyle={floorStyle}
+                    floorAgeStyle={floorAgeStyle}
+                    rightWallStyle={rightWallStyle}
+                    shadingConfig={shadingConfig}
+                    surfacePoints={model.surfacePoints}
+                    rows={model.rows}
+                    cols={model.cols}
+                    ages={model.ages}
+                    maxSurvivors={model.maxSurvivors}
+                    floorZ={FLOOR_DEPTH}
+                    valueStep={activeRightWallValueStep}
+                    valueMinorStep={activeRightWallMinorStep}
+                  />
+                )}
+                {layersEnabled.surface && (
+                  <>
+                    <SurfaceLayer
+                      quads={model.quads}
+                      triangles={model.triangles}
+                      surfaceStyle={{
+                        fill: vizStyle.surface.fill,
+                        stroke: vizStyle.surface.stroke,
+                        strokeWidth: vizStyle.surface.strokeWidth,
+                      }}
+                      shading={shadingConfig}
+                      lightDir={lightDir}
+                      drawSegments={false}
+                      yearSegByQuad={model.yearSegByQuad}
+                      yearStyle={vizStyle.years}
+                      ageSegByQuad={model.ageSegByQuad}
+                      ageStyle={vizStyle.ages}
+                      valueSegByQuad={model.valueSegByQuad}
+                      valueStyle={linesVizStyle.values}
+                      cohortSegByQuad={
+                        DEBUG_COHORT_ON_TOP
+                          ? undefined
+                          : model.cohortSegByQuad
+                      }
+                      cohortStyle={vizStyle.cohorts}
+                    />
+                    <g>
+                      <SurfaceLayer
+                        quads={model.quads}
+                        triangles={model.triangles}
+                        surfaceStyle={{
+                          fill: vizStyle.surface.fill,
+                          stroke: vizStyle.surface.stroke,
+                          strokeWidth: vizStyle.surface.strokeWidth,
+                        }}
+                        shading={shadingConfig}
+                        lightDir={lightDir}
+                        drawQuads={false}
+                        yearSegByQuad={model.yearSegByQuad}
+                        yearStyle={vizStyle.years}
+                        ageSegByQuad={model.ageSegByQuad}
+                        ageStyle={vizStyle.ages}
+                        valueSegByQuad={model.valueSegByQuad}
+                        valueStyle={linesVizStyle.values}
+                        cohortSegByQuad={model.cohortSegByQuad}
+                        cohortStyle={vizStyle.cohorts}
+                      />
+                    </g>
+                    <g id="surface-boundary">
+                      <polyline
+                        points={leftEdgeStr}
+                        fill="none"
+                        stroke={vizStyle.years.stroke}
+                        strokeWidth={vizStyle.years.thickWidth}
+                        strokeOpacity={vizStyle.years.thickOpacity}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={rightEdgeStr}
+                        fill="none"
+                        stroke={vizStyle.years.stroke}
+                        strokeWidth={vizStyle.years.thickWidth}
+                        strokeOpacity={vizStyle.years.thickOpacity}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={topEdgeStr}
+                        fill="none"
+                        stroke={vizStyle.ages.stroke}
+                        strokeWidth={vizStyle.ages.thickWidth}
+                        strokeOpacity={vizStyle.ages.thickOpacity}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <polyline
+                        points={bottomEdgeStr}
+                        fill="none"
+                        stroke={vizStyle.ages.stroke}
+                        strokeWidth={vizStyle.ages.thickWidth}
+                        strokeOpacity={vizStyle.ages.thickOpacity}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </g>
+                  </>
+                )}
+                {layersEnabled.lines && (
+                  <DataLinesLayer
+                    yearLines={model.yearLines}
+                    ageLines={model.ageLines}
+                    cohortLines={model.cohortLines}
+                    contourPolylines2D={model.contourPolylines2D}
+                    vizStyle={linesVizStyle}
+                    projectedSurface={model.projectedSurface}
+                    focus={hoverFocus}
+                    hoverOpacity={{
+                      highlightMult: HOVER_HIGHLIGHT_MULT,
+                      dimMult: HOVER_DIM_MULT,
                     }}
-                    shading={shadingConfig}
-                    lightDir={lightDir}
-                    drawQuads={false}
-                    yearSegByQuad={model.yearSegByQuad}
-                    yearStyle={vizStyle.years}
-                    ageSegByQuad={model.ageSegByQuad}
-                    ageStyle={vizStyle.ages}
-                    valueSegByQuad={model.valueSegByQuad}
-                    valueStyle={linesVizStyle.values}
-                    cohortSegByQuad={model.cohortSegByQuad}
-                    cohortStyle={vizStyle.cohorts}
+                    drawValues={false}
+                    drawAges={false}
+                    drawYears={false}
+                    showCohortLines={DEBUG_COHORT_ON_TOP}
+                    depthBuffer={depthBuffer}
+                    occlusion={OCCLUSION}
+                    surfacePoints={model.surfacePoints}
                   />
-                </g>
-                <g id="surface-boundary">
-                  <polyline
-                    points={leftEdgeStr}
-                    fill="none"
-                    stroke={vizStyle.years.stroke}
-                    strokeWidth={vizStyle.years.thickWidth}
-                    strokeOpacity={vizStyle.years.thickOpacity}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                )}
+                {layersEnabled.labels && (
+                  <LabelsLayer
+                    frame={model.frame}
+                    projection={projection}
+                    years={model.years}
+                    minYearExt={model.minYearExt}
+                    maxYearExt={model.maxYearExt}
+                    axisLabelBaseStyle={AXIS_LABEL_STYLE}
+                    axisLabelLayout={AXIS_LABEL_LAYOUT}
+                    vizStyle={{
+                      ages: { stroke: vizStyle.ages.stroke },
+                      values: { stroke: vizStyle.values.stroke },
+                      years: { stroke: vizStyle.years.stroke },
+                    }}
+                    valueLevels={{
+                      left: valueLevelConfig.left,
+                      right: valueLevelConfig.right,
+                    }}
+                    showTitle={showTitle}
+                    titleProps={titleProps}
+                    topValueByYear={topValueByYear}
                   />
-                  <polyline
-                    points={rightEdgeStr}
-                    fill="none"
-                    stroke={vizStyle.years.stroke}
-                    strokeWidth={vizStyle.years.thickWidth}
-                    strokeOpacity={vizStyle.years.thickOpacity}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                )}
+                {layersEnabled.interaction && (
+                  <InteractionLayer
+                    hover={hover ? { x: hover.x, y: hover.y } : null}
+                    accentColor={TOOLTIP_STYLE.accent}
+                    radius={vizStyle.debugPoints.radius * 2}
+                    strokeWidth={TOOLTIP_STYLE.borderWidth}
                   />
-                  <polyline
-                    points={topEdgeStr}
-                    fill="none"
-                    stroke={vizStyle.ages.stroke}
-                    strokeWidth={vizStyle.ages.thickWidth}
-                    strokeOpacity={vizStyle.ages.thickOpacity}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                  <polyline
-                    points={bottomEdgeStr}
-                    fill="none"
-                    stroke={vizStyle.ages.stroke}
-                    strokeWidth={vizStyle.ages.thickWidth}
-                    strokeOpacity={vizStyle.ages.thickOpacity}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </g>
+                )}
               </>
-            )}
-            {layersEnabled.lines && (
-              <DataLinesLayer
-                yearLines={model.yearLines}
-                ageLines={model.ageLines}
-                cohortLines={model.cohortLines}
-                contourPolylines2D={model.contourPolylines2D}
-                vizStyle={linesVizStyle}
-                projectedSurface={model.projectedSurface}
-                focus={hoverFocus}
-                hoverOpacity={{
-                  highlightMult: HOVER_HIGHLIGHT_MULT,
-                  dimMult: HOVER_DIM_MULT,
-                }}
-                drawValues={false}
-                drawAges={false}
-                drawYears={false}
-                showCohortLines={DEBUG_COHORT_ON_TOP}
-                depthBuffer={depthBuffer}
-                occlusion={OCCLUSION}
-                surfacePoints={model.surfacePoints}
-              />
-            )}
-            {layersEnabled.labels && (
-              <LabelsLayer
-                frame={model.frame}
-                projection={projection}
-                years={model.years}
-                minYearExt={model.minYearExt}
-                maxYearExt={model.maxYearExt}
-                axisLabelBaseStyle={AXIS_LABEL_STYLE}
-                axisLabelLayout={AXIS_LABEL_LAYOUT}
-                vizStyle={{
-                  ages: { stroke: vizStyle.ages.stroke },
-                  values: { stroke: vizStyle.values.stroke },
-                  years: { stroke: vizStyle.years.stroke },
-                }}
-                valueLevels={{
-                  left: valueLevelConfig.left,
-                  right: valueLevelConfig.right,
-                }}
-                showTitle={showTitle}
-                titleProps={titleProps}
-                topValueByYear={topValueByYear}
-              />
-            )}
-            {layersEnabled.interaction && (
-              <InteractionLayer
-                hover={hover ? { x: hover.x, y: hover.y } : null}
-                accentColor={TOOLTIP_STYLE.accent}
-                radius={vizStyle.debugPoints.radius * 2}
-                strokeWidth={TOOLTIP_STYLE.borderWidth}
-              />
             )}
           </g>
         </svg>
-        {hover && tooltipData && (
+        {renderMode === "normal" && hover && tooltipData && (
           <div
             style={{
               position: "absolute",
