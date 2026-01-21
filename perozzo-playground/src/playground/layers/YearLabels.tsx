@@ -18,6 +18,7 @@ type YearLabelsProps = {
   style: AxisLabelStyle;
   bottomAngleDeg: number;
   topValueByYear: Record<number, number>;
+  labelSides?: LabelSide[];
 };
 
 const formatYear = (year: number) => `${year}`;
@@ -41,6 +42,7 @@ export default function YearLabels({
   style,
   bottomAngleDeg,
   topValueByYear,
+  labelSides,
 }: YearLabelsProps) {
   const firstYear = years[0];
   const lastYear = years[years.length - 1];
@@ -55,7 +57,8 @@ export default function YearLabels({
     )
   ).sort((a, b) => a - b);
 
-  const labelPositions: LabelSide[] = ["top", "bottom"];
+  const labelPositions: LabelSide[] =
+    labelSides && labelSides.length > 0 ? labelSides : ["top", "bottom"];
 
   const clampYear = (year: number) =>
     Math.min(Math.max(year, minYearExt), maxYearExt);

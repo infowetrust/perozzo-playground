@@ -1,17 +1,40 @@
-import { useState, ChangeEvent } from "react";
+import { useState } from "react";
+import type { ChangeEvent } from "react";
 
 import PlateViz from "./PlateViz";
 import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import swedenContours from "../data/porozzo-contours.json";
-import usaCsv from "../data/usa-pop-1900-2025-5yr-native-topbins.csv?raw";
+import usaCsv from "../data/usa-pop-1900-2025-5yr-native-to100.csv?raw";
 import usaContours from "../data/usa-contours.json";
 
-const DATASETS = {
+type DatasetConfig = {
+  label: string;
+  csvText: string;
+  contours: unknown;
+  preset: "perozzoBasic" | "isometric30" | "steep45" | "levasseur";
+  canvas: { width: number; height: number };
+  frameMax: { age: number; value: number };
+  title: { bigWord: string; years: string };
+  valueLevels: {
+    left: number[];
+    right: number[];
+    backwallFull: number[];
+    backwallRightOnly: number[];
+  };
+  valuesHeavyStep: number;
+  rightWallValueStep: number;
+  rightWallMinorStep: number;
+  maxHeight: number;
+  projectionTweaks?: { ageScaleMultiplier?: number; ageAxisAngleDeg?: number };
+  showTitle: boolean;
+};
+
+const DATASETS: Record<string, DatasetConfig> = {
   sweden: {
     label: "Sweden (1750–1875)",
     csvText: swedenCsv,
     contours: swedenContours,
-    preset: "levasseur" as const,
+    preset: "levasseur",
     canvas: { width: 700, height: 700 },
     frameMax: { age: 110, value: 325_000 },
     title: { bigWord: "SWEDEN", years: "1750–1875" },
@@ -24,28 +47,31 @@ const DATASETS = {
     valuesHeavyStep: 50_000,
     rightWallValueStep: 50_000,
     rightWallMinorStep: 10_000,
+    maxHeight: 3.0,
     showTitle: true,
   },
   usa: {
     label: "USA (1900–2025)",
     csvText: usaCsv,
     contours: usaContours,
-    preset: "levasseur" as const,
+    preset: "levasseur",
     canvas: { width: 900, height: 650 },
     frameMax: { age: 110, value: 25_000_000 },
     title: { bigWord: "UNITED STATES", years: "1900–2025" },
     valueLevels: {
       left: [5_000_000, 10_000_000, 15_000_000],
-      right: [5_000_000, 10_000_000, 15_000_000, 20_000_000, 25_000_000],
+      right: [5_000_000, 10_000_000, 15_000_000],
       backwallFull: [0, 5_000_000, 10_000_000, 15_000_000],
-      backwallRightOnly: [20_000_000, 25_000_000],
+      backwallRightOnly: [],
     },
     valuesHeavyStep: 5_000_000,
     rightWallValueStep: 5_000_000,
     rightWallMinorStep: 1_000_000,
+    maxHeight: 2.6,
+    projectionTweaks: { ageScaleMultiplier: 1.2, ageAxisAngleDeg: 140 },
     showTitle: false,
   },
-} as const;
+};
 
 type DatasetKey = keyof typeof DATASETS;
 
@@ -94,6 +120,8 @@ export default function AppDatasets() {
         valuesHeavyStep={active.valuesHeavyStep}
         rightWallValueStep={active.rightWallValueStep}
         rightWallMinorStep={active.rightWallMinorStep}
+        maxHeight={active.maxHeight}
+        projectionTweaks={active.projectionTweaks}
         showTitle={active.showTitle}
         activeKey={datasetKey}
       />

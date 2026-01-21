@@ -26,6 +26,12 @@ export type LineStyle = {
 export const HOVER_HIGHLIGHT_MULT = 2;
 export const HOVER_DIM_MULT = 0.85;
 
+export const OCCLUSION = {
+  enabled: true,
+  // when true, all surface-following lines are drawn via interleaving (occluded)
+  // and the old on-top polyline pass is disabled
+};
+
 export function isHeavy(value: number, heavyStep: number): boolean {
   if (!heavyStep) return false;
   return value % heavyStep === 0;
@@ -55,5 +61,12 @@ export const TRI_RENDER = {
   sortMetric: "maxY" as const,
   // Skip triangles that are nearly edge-on / slivers in screen space.
   // Larger = more aggressive culling (fewer spikes but may remove facets).
-  degenerateAreaEps: 8,
+  degenerateAreaEps: 0,
+  minArea2D: 0.5,
+  keepBothTris: true,
+  cullMode: "bothOnly" as const,
+  split4Enabled: true,
+  split4CenterDiffPx: 5,
+  split4DebugStroke: true,
+  debugTriVis: false,
 };

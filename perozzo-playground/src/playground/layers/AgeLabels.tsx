@@ -14,6 +14,7 @@ type AgeLabelsProps = {
   tickLen: number;
   textOffset: number;
   style: AxisLabelStyle;
+  age100Text?: string;
 };
 
 const LABEL_AGES = [0, 25, 50, 75, 100];
@@ -34,6 +35,7 @@ export default function AgeLabels({
   tickLen,
   textOffset,
   style,
+  age100Text,
 }: AgeLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
@@ -69,7 +71,8 @@ export default function AgeLabels({
         const baseYear = labelYearFor(s);
         const inwardYear = inwardYearFor(s, baseYear);
         return LABEL_AGES.map((age) => {
-          const text = LABEL_TEXT[age] ?? `${age}`;
+          const text =
+            age === 100 && age100Text ? age100Text : LABEL_TEXT[age] ?? `${age}`;
           const anchor = projectIso(frame.point(baseYear, age, 0), projection);
           const dir = dirForAge(age, s, baseYear, inwardYear);
           const textPos = {

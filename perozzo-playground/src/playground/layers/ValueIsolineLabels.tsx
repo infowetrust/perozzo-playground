@@ -16,6 +16,7 @@ type ValueIsolineLabelsProps = {
   style: AxisLabelStyle;
   leftLevels: number[];
   rightLevels: number[];
+  labelFormat?: "millions";
 };
 
 export default function ValueIsolineLabels({
@@ -29,6 +30,7 @@ export default function ValueIsolineLabels({
   style,
   leftLevels,
   rightLevels,
+  labelFormat,
 }: ValueIsolineLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
@@ -61,7 +63,9 @@ export default function ValueIsolineLabels({
   };
 
   const formatLevel = (level: number): string =>
-    level.toLocaleString("en-US");
+    labelFormat === "millions"
+      ? `${Math.round(level / 1_000_000)} million`
+      : level.toLocaleString("en-US");
 
   return (
     <g>

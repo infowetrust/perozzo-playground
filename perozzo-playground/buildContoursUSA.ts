@@ -13,12 +13,18 @@ import fs from "fs";
 import path from "path";
 import { contours as d3Contours } from "d3-contour";
 
-import { GridField } from "./src/core/contours";
 
 const csvPath = path.resolve(
-  "./src/data/usa-pop-1900-2025-5yr-native-topbins.csv"
+  "./src/data/usa-pop-1900-2025-5yr-native-to100.csv"
 );
 const contoursOutPath = path.resolve("./src/data/usa-contours.json");
+
+// Run stitching tolerance, expressed in grid cells (not years)
+const JOIN_TOL_CELLS_X = 0.5; // year-axis tolerance in units of one year step
+const JOIN_TOL_CELLS_Y = 0.5; // age-axis tolerance in units of one age step
+const AGE0_ASSIGN_TOL_CELLS = 0.75; // max year tolerance for age=0 endpoint snapping
+const DEBUG_JOIN = false;
+const DEBUG_AGE0 = true;
 
 /* ---------- TYPES ---------- */
 
@@ -29,6 +35,14 @@ type UsaCsvRow = {
 };
 
 type YearAgePoint = { year: number; age: number };
+
+type GridField = {
+  rows: number;
+  cols: number;
+  values: number[];
+  ages: number[];
+  years: number[];
+};
 
 /* ---------- HELPER FUNCTIONS ---------- */
 
@@ -111,6 +125,24 @@ function dedupPoints(
   return out;
 }
 
+function dedupeRuns(runs: YearAgePoint[][]): YearAgePoint[][] {
+  const seen = new Set<string>();
+  const out: YearAgePoint[][] = [];
+  for (const run of runs) {
+    const signature = run
+      .map((p) => {
+        const year = Math.round(p.year * 1e3) / 1e3;
+        const age = Math.round(p.age * 1e3) / 1e3;
+        return `${year},${age}`;
+      })
+      .join("|");
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    out.push(run);
+  }
+  return out;
+}
+
 function nearest(target: number, xs: number[]): number | null {
   if (xs.length === 0 || !Number.isFinite(target)) return null;
   let best = xs[0];
@@ -122,6 +154,7 @@ function nearest(target: number, xs: number[]): number | null {
   }
   return Number.isFinite(best) ? best : null;
 }
+
 
 function rowBelowForAge(age: number, agesArr: number[]): number {
   if (age <= agesArr[0]) return 0;
@@ -222,6 +255,75 @@ function fractionalAgeAtYear(
   return agesArr[row0] + t * (agesArr[row1] - agesArr[row0]);
 }
 
+function nearestBoundaryYearCrossingAtAge(
+  level: number,
+  ageFixed: number,
+  approxYear: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number | null {
+  const yearMin = yearsArr[0];
+  const yearMax = yearsArr[yearsArr.length - 1];
+  const target = Math.max(yearMin, Math.min(yearMax, approxYear));
+  let best: number | null = null;
+  let bestDist = Infinity;
+  for (let col = 0; col < yearsArr.length - 1; col++) {
+    const yFrac = fractionalYearAtAge(
+      level,
+      ageFixed,
+      col,
+      col + 1,
+      yearsArr,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (!Number.isFinite(yFrac ?? NaN)) continue;
+    const y = yFrac as number;
+    const d = Math.abs(y - target);
+    if (d < bestDist) {
+      bestDist = d;
+      best = y;
+    }
+  }
+  return best;
+}
+
+function boundaryYearCrossingsAtAge(
+  level: number,
+  ageFixed: number,
+  yearsArr: number[],
+  agesArr: number[],
+  valuesArr: number[],
+  colsTotal: number
+): number[] {
+  const out: number[] = [];
+  for (let col = 0; col < yearsArr.length - 1; col++) {
+    const yFrac = fractionalYearAtAge(
+      level,
+      ageFixed,
+      col,
+      col + 1,
+      yearsArr,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (!Number.isFinite(yFrac ?? NaN)) continue;
+    out.push(yFrac as number);
+  }
+  out.sort((a, b) => a - b);
+  const deduped: number[] = [];
+  for (const y of out) {
+    const last = deduped[deduped.length - 1];
+    if (last != null && Math.abs(last - y) < 1e-6) continue;
+    deduped.push(y);
+  }
+  return deduped;
+}
+
 function adjustEndpointToBoundary(
   point: YearAgePoint,
   level: number,
@@ -257,37 +359,19 @@ function adjustEndpointToBoundary(
 
   if (side === "top" || side === "bottom") {
     const ageFixed = side === "top" ? ageMin : ageMax;
-    const colIdx = yearsArr.indexOf(point.year);
-    if (colIdx < 0) return point;
-    const colBefore = Math.max(0, colIdx - 1);
-    const colAfter = Math.min(yearsArr.length - 1, colIdx + 1);
-
-    let yFrac: number | null = null;
-    if (colBefore !== colIdx) {
-      yFrac = fractionalYearAtAge(
-        level,
-        ageFixed,
-        colBefore,
-        colIdx,
-        yearsArr,
-        agesArr,
-        valuesArr,
-        colsTotal
-      );
-    }
-    if (yFrac == null && colAfter !== colIdx) {
-      yFrac = fractionalYearAtAge(
-        level,
-        ageFixed,
-        colIdx,
-        colAfter,
-        yearsArr,
-        agesArr,
-        valuesArr,
-        colsTotal
-      );
-    }
-    return yFrac != null ? { year: yFrac, age: ageFixed } : point;
+    const clampedYear = Math.max(yearMin, Math.min(yearMax, point.year));
+    const yNearest = nearestBoundaryYearCrossingAtAge(
+      level,
+      ageFixed,
+      clampedYear,
+      yearsArr,
+      agesArr,
+      valuesArr,
+      colsTotal
+    );
+    if (!Number.isFinite(yNearest ?? NaN)) return point;
+    const yearClamped = Math.max(yearMin, Math.min(yearMax, yNearest as number));
+    return { year: yearClamped, age: ageFixed };
   }
 
   if (side === "left" || side === "right") {
@@ -308,116 +392,6 @@ function adjustEndpointToBoundary(
   return point;
 }
 
-function rotateToMinYear(pts: YearAgePoint[]): YearAgePoint[] {
-  if (pts.length === 0) return pts;
-  let minIdx = 0;
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i].year < pts[minIdx].year) {
-      minIdx = i;
-    }
-  }
-  return pts.slice(minIdx).concat(pts.slice(0, minIdx));
-}
-
-function extendByColumnCrossings(
-  pts: YearAgePoint[],
-  level: number,
-  yearsArr: number[],
-  agesArr: number[],
-  valuesArr: number[],
-  colsTotal: number
-): YearAgePoint[] {
-  if (pts.length < 2) return pts;
-  const yearIndex = new Map<number, number>();
-  yearsArr.forEach((y, i) => yearIndex.set(y, i));
-  const eps = 1e-6;
-
-  while (true) {
-    const first = pts[0];
-    const col = yearIndex.get(first.year);
-    if (col == null || col <= 0) break;
-    const prevCol = col - 1;
-    const prevYear = yearsArr[prevCol];
-    if (Math.abs(prevYear - first.year) < eps) break;
-    const crosses = crossingAgesForCol(
-      level,
-      prevCol,
-      agesArr,
-      valuesArr,
-      colsTotal
-    );
-    if (crosses.length === 0) break;
-    const age = nearest(first.age, crosses);
-    if (age == null) break;
-    pts.unshift({ year: prevYear, age });
-  }
-
-  while (true) {
-    const last = pts[pts.length - 1];
-    const col = yearIndex.get(last.year);
-    if (col == null || col >= yearsArr.length - 1) break;
-    const nextCol = col + 1;
-    const nextYear = yearsArr[nextCol];
-    if (Math.abs(nextYear - last.year) < eps) break;
-    const crosses = crossingAgesForCol(
-      level,
-      nextCol,
-      agesArr,
-      valuesArr,
-      colsTotal
-    );
-    if (crosses.length === 0) break;
-    const age = nearest(last.age, crosses);
-    if (age == null) break;
-    pts.push({ year: nextYear, age });
-  }
-
-  return pts;
-}
-
-function splitByYearDirection(pts: YearAgePoint[]): YearAgePoint[][] {
-  if (pts.length === 0) return [];
-  const runs: YearAgePoint[][] = [];
-  let current: YearAgePoint[] = [pts[0]];
-  let prevSign = 0;
-  for (let i = 1; i < pts.length; i++) {
-    const prev = pts[i - 1];
-    const curr = pts[i];
-    const diff = curr.year - prev.year;
-    const sign = Math.sign(diff);
-    if (sign !== 0 && prevSign !== 0 && sign !== prevSign) {
-      runs.push(current);
-      current = [prev, curr];
-      prevSign = sign;
-      continue;
-    }
-    if (sign !== 0) prevSign = sign;
-    current.push(curr);
-  }
-  if (current.length >= 1) {
-    runs.push(current);
-  }
-  return runs;
-}
-
-function pickBestRun(runs: YearAgePoint[][]): YearAgePoint[] | null {
-  if (runs.length === 0) return null;
-  let best = runs[0];
-  let bestSpan =
-    best.length >= 2 ? Math.abs(best[best.length - 1].year - best[0].year) : 0;
-  for (let i = 1; i < runs.length; i++) {
-    const run = runs[i];
-    const span =
-      run.length >= 2 ? Math.abs(run[run.length - 1].year - run[0].year) : 0;
-    if (span > bestSpan) {
-      best = run;
-      bestSpan = span;
-    } else if (span === bestSpan && run.length > best.length) {
-      best = run;
-    }
-  }
-  return best;
-}
 
 /* ---------- READ + PARSE TIDY CSV ---------- */
 
@@ -505,158 +479,251 @@ for (let level = levelStep; level <= maxLevel; level += levelStep) {
 }
 
 /* ---------- COMPUTE RAW ISOLINES ---------- */
-
-const generator = d3Contours()
-  .size([field.cols, field.rows])
-  .thresholds(levels);
-const contourSets = generator(field.values);
-
 const yearBase = years[0] ?? 0;
 const ageBase = ages[0] ?? 0;
 const maxYear = years[years.length - 1] ?? yearBase;
 const maxAge = ages[ages.length - 1] ?? ageBase;
 const yearStep = years.length > 1 ? years[1] - years[0] : 1;
 const ageStep = ages.length > 1 ? ages[1] - ages[0] : 1;
+const joinTolYear = JOIN_TOL_CELLS_X * yearStep;
+const joinTolAge = JOIN_TOL_CELLS_Y * ageStep;
+const age0AssignTolYear = AGE0_ASSIGN_TOL_CELLS * yearStep;
+const RUN_JUMP_YEAR_MULT = 1.1;
+const RUN_JUMP_AGE_MULT = 1.8;
 
+const levelRuns = new Map<number, YearAgePoint[][]>();
 const jsonReady: { level: number; points: YearAgePoint[] }[] = [];
 
 /* ---------- NORMALIZE EACH RING INTO CLEAN POLYLINE ---------- */
 
+const generator = d3Contours()
+  .size([field.cols, field.rows])
+  .thresholds(levels);
+const contourSets = generator(field.values);
+
+const heavyStep = 5_000_000;
+const minRunPts = 4;
+const minBboxArea = yearStep * ageStep * 0.25;
+
+const isBoundaryPoint = (x: number, y: number) => {
+  const eps = 1e-6;
+  return (
+    x <= eps ||
+    y <= eps ||
+    x >= colsCount - 1 - eps ||
+    y >= rowsCount - 1 - eps
+  );
+};
+
+const toYearAge = (x: number, y: number): YearAgePoint => ({
+  year: yearBase + x * yearStep,
+  age: ageBase + y * ageStep,
+});
+
+const normalizeRun = (run: YearAgePoint[]): YearAgePoint[] => {
+  const out: YearAgePoint[] = [];
+  for (const p of run) {
+    const last = out[out.length - 1];
+    if (
+      last &&
+      Math.abs(last.year - p.year) < 1e-9 &&
+      Math.abs(last.age - p.age) < 1e-9
+    ) {
+      continue;
+    }
+    out.push(p);
+  }
+  if (out.length < 2) return [];
+  return out;
+};
+
+const isClosedRun = (run: YearAgePoint[]) => {
+  if (run.length < 2) return false;
+  const first = run[0];
+  const last = run[run.length - 1];
+  return (
+    Math.abs(first.year - last.year) < 1e-9 &&
+    Math.abs(first.age - last.age) < 1e-9
+  );
+};
+
+const runWithoutClosingPoint = (run: YearAgePoint[]) =>
+  isClosedRun(run) ? run.slice(0, -1) : run;
+
+const runSignature = (run: YearAgePoint[]): string => {
+  const base = runWithoutClosingPoint(run);
+  const key = base
+    .map((p) => {
+      const year = Math.round(p.year * 1e6) / 1e6;
+      const age = Math.round(p.age * 1e6) / 1e6;
+      return `${year},${age}`;
+    })
+    .join("|");
+  const rev = base
+    .slice()
+    .reverse()
+    .map((p) => {
+      const year = Math.round(p.year * 1e6) / 1e6;
+      const age = Math.round(p.age * 1e6) / 1e6;
+      return `${year},${age}`;
+    })
+    .join("|");
+  return key < rev ? key : rev;
+};
+
+const isOnBoundary = (p: YearAgePoint) =>
+  Math.abs(p.age - ageBase) < 1e-6 ||
+  Math.abs(p.age - maxAge) < 1e-6 ||
+  Math.abs(p.year - yearBase) < 1e-6 ||
+  Math.abs(p.year - maxYear) < 1e-6;
+
+const isTop = (p: YearAgePoint) => Math.abs(p.age - ageBase) < 1e-6;
+const isBottom = (p: YearAgePoint) => Math.abs(p.age - maxAge) < 1e-6;
+
+const endpointsClose = (a: YearAgePoint, b: YearAgePoint) => {
+  const boundary = isOnBoundary(a) || isOnBoundary(b);
+  const tolYear = boundary ? joinTolYear * 0.25 : joinTolYear;
+  const tolAge = boundary ? joinTolAge * 0.25 : joinTolAge;
+  return (
+    Math.abs(a.year - b.year) <= tolYear &&
+    Math.abs(a.age - b.age) <= tolAge
+  );
+};
+
+const DEBUG_MERGE_LEVEL = 20_000_000;
+const DEBUG_MERGE = true;
+
+const dirAt = (
+  run: YearAgePoint[],
+  which: "start" | "end"
+): { x: number; y: number } | null => {
+  if (run.length < 2) return null;
+  if (which === "start") {
+    const a = run[0];
+    const b = run[1];
+    const dx = b.year - a.year;
+    const dy = b.age - a.age;
+    const n = Math.hypot(dx, dy);
+    if (!n) return null;
+    return { x: dx / n, y: dy / n };
+  }
+  const a = run[run.length - 2];
+  const b = run[run.length - 1];
+  const dx = b.year - a.year;
+  const dy = b.age - a.age;
+  const n = Math.hypot(dx, dy);
+  if (!n) return null;
+  return { x: dx / n, y: dy / n };
+};
+
+const directionsCompatible = (
+  mode: "aEnd-bStart" | "aEnd-bEnd" | "aStart-bStart" | "aStart-bEnd",
+  a: YearAgePoint[],
+  b: YearAgePoint[]
+) => {
+  const COS_THRESH = 0.85; // tighter (~32 degrees)
+  let dirA: { x: number; y: number } | null = null;
+  let dirB: { x: number; y: number } | null = null;
+  if (mode === "aEnd-bStart") {
+    dirA = dirAt(a, "end");
+    dirB = dirAt(b, "start");
+  } else if (mode === "aEnd-bEnd") {
+    dirA = dirAt(a, "end");
+    const d = dirAt(b, "end");
+    dirB = d ? { x: -d.x, y: -d.y } : null;
+  } else if (mode === "aStart-bStart") {
+    const d = dirAt(a, "start");
+    dirA = d ? { x: -d.x, y: -d.y } : null;
+    dirB = dirAt(b, "start");
+  } else if (mode === "aStart-bEnd") {
+    dirA = dirAt(b, "end");
+    dirB = dirAt(a, "start");
+  }
+  if (!dirA || !dirB) return false;
+  const dot = dirA.x * dirB.x + dirA.y * dirB.y;
+  return dot >= COS_THRESH;
+};
+
+const splitRunOnJumps = (run: YearAgePoint[]) => {
+  const out: YearAgePoint[][] = [];
+  if (run.length < 2) return out;
+  let current: YearAgePoint[] = [run[0]];
+  for (let i = 1; i < run.length; i++) {
+    const prev = run[i - 1];
+    const next = run[i];
+    const dYear = Math.abs(next.year - prev.year);
+    const dAge = Math.abs(next.age - prev.age);
+    const jump =
+      dYear > yearStep * RUN_JUMP_YEAR_MULT ||
+      dAge > ageStep * RUN_JUMP_AGE_MULT;
+    if (jump && current.length >= 2) {
+      out.push(current);
+      current = [prev, next];
+    } else {
+      current.push(next);
+    }
+  }
+  if (current.length >= 2) out.push(current);
+  return out;
+};
+
 for (const contour of contourSets) {
   const levelValue = Number(contour.value);
-
   for (const polygon of contour.coordinates) {
     for (const ring of polygon) {
       if (!ring || ring.length < 2) continue;
-
-      const ringPoints = ring.map((point) => {
-        const [x, y] = point;
-        const xClamped = Math.max(0, Math.min(colsCount - 1, x));
-        const yClamped = Math.max(0, Math.min(rowsCount - 1, y));
-        const yearRaw = yearBase + xClamped * yearStep;
-        const ageRaw = ageBase + yClamped * ageStep;
-        return {
-          year: Math.max(yearBase, Math.min(maxYear, yearRaw)),
-          age: Math.max(ageBase, Math.min(maxAge, ageRaw)),
-        };
-      });
-
-      const snapped = resampleToYearTicks(ringPoints, years);
-      let corrected: YearAgePoint[] = [];
-      for (const pt of snapped) {
-        const col = years.indexOf(pt.year);
-        if (col < 0) continue;
-        const crossings = crossingAgesForCol(
-          levelValue,
-          col,
-          ages,
-          values,
-          colsCount
-        );
-        if (crossings.length === 0) continue;
-        const snappedAge = nearest(pt.age, crossings);
-        if (snappedAge == null) continue;
-        corrected.push({ year: pt.year, age: snappedAge });
-      }
-
-      corrected = dedupPoints(corrected);
-      if (corrected.length >= 2) {
-        const first = corrected[0];
-        const last = corrected[corrected.length - 1];
-        if (
-          Math.abs(first.year - last.year) < 1e-9 &&
-          Math.abs(first.age - last.age) < 1e-9
-        ) {
-          corrected.pop();
-        }
-      }
-      corrected = rotateToMinYear(corrected);
-      corrected = extendByColumnCrossings(
-        corrected,
-        levelValue,
-        years,
-        ages,
-        values,
-        colsCount
-      );
-
-      if (corrected.length >= 2) {
-        const eps = 1e-6;
-        const yearMin = years[0];
-        const minYearInLine = Math.min(...corrected.map((p) => p.year));
-        const wantsLeft = minYearInLine <= yearMin + yearStep + eps;
-        if (wantsLeft) {
-          const leftCross = crossingAgesForCol(
-            levelValue,
-            0,
-            ages,
-            values,
-            colsCount
-          );
-          if (leftCross.length > 0) {
-            const firstIdx = corrected.reduce(
-              (bestIdx, p, idx) =>
-                p.year < corrected[bestIdx].year ? idx : bestIdx,
-              0
-            );
-            const targetAge = corrected[firstIdx].age;
-            const chosenAge = nearest(targetAge, leftCross);
-            if (chosenAge != null) {
-              const alreadyHas = corrected.some(
-                (p) =>
-                  p.year === yearMin && Math.abs(p.age - chosenAge) < 1e-6
-              );
-              if (!alreadyHas) {
-                corrected.unshift({ year: yearMin, age: chosenAge });
-              }
-            }
+      const points = ring.map(([x, y]) => ({ x, y }));
+      const boundaryHits = points
+        .map((p, idx) => (isBoundaryPoint(p.x, p.y) ? idx : -1))
+        .filter((idx) => idx >= 0);
+      const runs: { points: YearAgePoint[]; closedCandidate: boolean }[] = [];
+      if (boundaryHits.length > 0) {
+        const splitIdx = Array.from(new Set(boundaryHits)).sort((a, b) => a - b);
+        const indices = [...splitIdx, splitIdx[0] + points.length];
+        for (let i = 0; i < indices.length - 1; i++) {
+          const start = indices[i];
+          const end = indices[i + 1];
+          const slice: { x: number; y: number }[] = [];
+          for (let j = start; j <= end; j++) {
+            slice.push(points[j % points.length]);
           }
+          if (slice.length < 2) continue;
+          const boundaryCount = slice.filter((p) =>
+            isBoundaryPoint(p.x, p.y)
+          ).length;
+          const boundaryRatio = boundaryCount / slice.length;
+          if (boundaryRatio > 0.5) continue;
+          runs.push({
+            points: slice.map((p) => toYearAge(p.x, p.y)),
+            closedCandidate: false,
+          });
         }
+      } else {
+        runs.push({
+          points: points.map((p) => toYearAge(p.x, p.y)),
+          closedCandidate: true,
+        });
       }
 
-      if (corrected.length >= 2) {
-        corrected[0] = adjustEndpointToBoundary(
-          corrected[0],
-          levelValue,
-          years,
-          ages,
-          values,
-          colsCount
-        );
-        corrected[corrected.length - 1] = adjustEndpointToBoundary(
-          corrected[corrected.length - 1],
-          levelValue,
-          years,
-          ages,
-          values,
-          colsCount
-        );
-
-        corrected = corrected.filter(
-          (p) => Number.isFinite(p.year) && Number.isFinite(p.age)
-        );
-        corrected = dedupPoints(corrected);
-
-        const runs = splitByYearDirection(corrected);
-        const best = pickBestRun(runs);
-        if (!best || best.length < 2) continue;
-        corrected = best;
-
-        let flips = 0;
-        let prevSign = 0;
-        for (let i = 1; i < corrected.length; i++) {
-          const dy = corrected[i].year - corrected[i - 1].year;
-          const s = Math.sign(dy);
-          if (s !== 0 && prevSign !== 0 && s !== prevSign) flips++;
-          if (s !== 0) prevSign = s;
+      for (const run of runs) {
+        const normalized = normalizeRun(run.points);
+        if (normalized.length < 2) continue;
+        const first = normalized[0];
+        const last = normalized[normalized.length - 1];
+        const isClosed =
+          Math.abs(first.year - last.year) < 1e-9 &&
+          Math.abs(first.age - last.age) < 1e-9;
+        if (run.closedCandidate) {
+          if (!isClosed) {
+            normalized.push(first);
+          }
+        } else if (isClosed) {
+          normalized.pop();
         }
-        if (flips > 0) {
-          throw new Error(
-            `Contour still flips year direction at level=${levelValue} flips=${flips}`
-          );
-        }
-
-        jsonReady.push({ level: levelValue, points: corrected });
+        if (normalized.length < 2) continue;
+        const bucket = levelRuns.get(levelValue) ?? [];
+        bucket.push(normalized);
+        levelRuns.set(levelValue, bucket);
       }
     }
   }
@@ -664,14 +731,313 @@ for (const contour of contourSets) {
 
 /* ---------- VALIDATION + WRITE JSON ---------- */
 
-for (const iso of jsonReady) {
-  for (const p of iso.points) {
-    if (!Number.isFinite(p.year) || !Number.isFinite(p.age)) {
-      throw new Error(
-        `Invalid contour point at level=${iso.level}: ${JSON.stringify(p)}`
+const perLevelSummary: { level: number; runs: number; points: number }[] = [];
+const levelsSorted = Array.from(levelRuns.keys()).sort((a, b) => a - b);
+for (const level of levelsSorted) {
+  let runs = levelRuns.get(level) ?? [];
+  const seen = new Set<string>();
+  runs = runs.filter((run) => {
+    const sig = runSignature(run);
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  });
+  if (DEBUG_MERGE && level === DEBUG_MERGE_LEVEL) {
+    const before = runs.length;
+    const splitRuns = runs.flatMap(splitRunOnJumps);
+    console.log(
+      `[SPLIT] level=${level} runsBefore=${before} runsAfter=${splitRuns.length}`
+    );
+    runs = splitRuns;
+  } else {
+    runs = runs.flatMap(splitRunOnJumps);
+  }
+
+  const closedRuns = runs.filter((run) => isClosedRun(run));
+  let openRuns = runs.filter((run) => !isClosedRun(run));
+
+  let merges = 0;
+  if (DEBUG_MERGE && level === DEBUG_MERGE_LEVEL) {
+    runs.forEach((run, idx) => {
+      let maxLen = 0;
+      let maxIdx = -1;
+      for (let i = 0; i < run.length - 1; i++) {
+        const a = run[i];
+        const b = run[i + 1];
+        const d = Math.hypot(b.year - a.year, b.age - a.age);
+        if (d > maxLen) {
+          maxLen = d;
+          maxIdx = i;
+        }
+      }
+      console.log(
+        `[RUN] level=${level} run=${idx} pts=${run.length} maxSeg=${maxLen.toFixed(
+          3
+        )} at=${maxIdx}`
       );
+    });
+  }
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < openRuns.length; i++) {
+      for (let j = i + 1; j < openRuns.length; j++) {
+        const a = openRuns[i];
+        const b = openRuns[j];
+        const aStart = a[0];
+        const aEnd = a[a.length - 1];
+        const bStart = b[0];
+        const bEnd = b[b.length - 1];
+        const pairs = [
+          { aP: aEnd, bP: bStart, mode: "aEnd-bStart" },
+          { aP: aEnd, bP: bEnd, mode: "aEnd-bEnd" },
+          { aP: aStart, bP: bStart, mode: "aStart-bStart" },
+          { aP: aStart, bP: bEnd, mode: "aStart-bEnd" },
+        ];
+        let matched = false;
+        for (const pair of pairs) {
+          if (
+            (isTop(pair.aP) && isTop(pair.bP)) ||
+            (isBottom(pair.aP) && isBottom(pair.bP))
+          ) {
+            continue;
+          }
+          if (!endpointsClose(pair.aP, pair.bP)) {
+            continue;
+          }
+          const dirOk = directionsCompatible(pair.mode, a, b);
+          if (!dirOk) {
+            continue;
+          }
+          if (DEBUG_MERGE && level === DEBUG_MERGE_LEVEL) {
+            const da = Math.hypot(
+              pair.aP.year - pair.bP.year,
+              pair.aP.age - pair.bP.age
+            );
+            const dirA = dirAt(
+              pair.mode.startsWith("aStart") ? a : a,
+              pair.mode.startsWith("aStart") ? "start" : "end"
+            );
+            const dirB = dirAt(
+              pair.mode.endsWith("bStart") ? b : b,
+              pair.mode.endsWith("bStart") ? "start" : "end"
+            );
+            const dot =
+              dirA && dirB ? dirA.x * dirB.x + dirA.y * dirB.y : NaN;
+            console.log(
+              `[MERGE] level=${level} mode=${pair.mode} dist=${da.toFixed(
+                3
+              )} dot=${Number.isFinite(dot) ? dot.toFixed(3) : "NaN"}`
+            );
+          }
+          if (pair.mode === "aEnd-bStart") {
+            openRuns[i] = a.concat(b);
+          } else if (pair.mode === "aEnd-bEnd") {
+            openRuns[i] = a.concat(b.slice().reverse());
+          } else if (pair.mode === "aStart-bStart") {
+            openRuns[i] = a.slice().reverse().concat(b);
+          } else if (pair.mode === "aStart-bEnd") {
+            openRuns[i] = b.concat(a);
+          }
+          matched = true;
+          break;
+        }
+        if (!matched) {
+          continue;
+        }
+        openRuns.splice(j, 1);
+        merged = true;
+        merges += 1;
+        break outer;
+      }
     }
   }
+  openRuns = openRuns.map((run) => {
+    if (run.length < 2) return run;
+    const start = adjustEndpointToBoundary(
+      run[0],
+      level,
+      years,
+      ages,
+      values,
+      colsCount
+    );
+    const end = adjustEndpointToBoundary(
+      run[run.length - 1],
+      level,
+      years,
+      ages,
+      values,
+      colsCount
+    );
+    return [start, ...run.slice(1, -1), end];
+  });
+  runs = closedRuns.concat(openRuns);
+  if (DEBUG_JOIN) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[JOIN] level=${level} merges=${merges} runsBefore=${levelRuns.get(level)?.length ?? 0} runsAfter=${runs.length}`
+    );
+  }
+  if (runs.length > 0) {
+    const crossings = boundaryYearCrossingsAtAge(
+      level,
+      ageBase,
+      years,
+      ages,
+      values,
+      colsCount
+    );
+    if (crossings.length > 0) {
+      const endpoints: {
+        runIndex: number;
+        pos: "start" | "end";
+        year: number;
+        assigned: boolean;
+      }[] = [];
+      runs.forEach((run, idx) => {
+        if (run.length < 2) return;
+        const first = run[0];
+        const last = run[run.length - 1];
+        if (isTop(first)) {
+          endpoints.push({
+            runIndex: idx,
+            pos: "start",
+            year: first.year,
+            assigned: false,
+          });
+        }
+        if (isTop(last)) {
+          endpoints.push({
+            runIndex: idx,
+            pos: "end",
+            year: last.year,
+            assigned: false,
+          });
+        }
+      });
+      const used = new Set<number>();
+      const assignments = endpoints
+        .map((ep) => {
+          let bestDist = Infinity;
+          for (const y of crossings) {
+            bestDist = Math.min(bestDist, Math.abs(y - ep.year));
+          }
+          return { ...ep, bestDist };
+        })
+        .sort((a, b) => a.bestDist - b.bestDist);
+      for (const ep of assignments) {
+        let bestIndex = -1;
+        let bestDist = Infinity;
+        for (let i = 0; i < crossings.length; i++) {
+          if (used.has(i)) continue;
+          const y = crossings[i];
+          const dist = Math.abs(y - ep.year);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+          }
+        }
+        if (bestIndex < 0 || bestDist > age0AssignTolYear) {
+          continue;
+        }
+        used.add(bestIndex);
+        const y = crossings[bestIndex];
+        const run = runs[ep.runIndex];
+        if (!run || run.length < 2) continue;
+        if (ep.pos === "start") {
+          run[0] = { year: y, age: ageBase };
+        } else {
+          run[run.length - 1] = { year: y, age: ageBase };
+        }
+        ep.assigned = true;
+      }
+      const keyOf = (year: number) => Math.round(year * 1e6) / 1e6;
+      const seenKeys = new Set<number>();
+      for (const ep of endpoints) {
+        const run = runs[ep.runIndex];
+        if (!run || run.length < 2) continue;
+        const point = ep.pos === "start" ? run[0] : run[run.length - 1];
+        const key = keyOf(point.year);
+        if (!seenKeys.has(key)) {
+          seenKeys.add(key);
+          continue;
+        }
+        if (ep.assigned) {
+          continue;
+        }
+        let bestIndex = -1;
+        let bestDist = Infinity;
+        for (let i = 0; i < crossings.length; i++) {
+          if (used.has(i)) continue;
+          const y = crossings[i];
+          const dist = Math.abs(y - point.year);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestIndex = i;
+          }
+        }
+        if (bestIndex < 0) continue;
+        used.add(bestIndex);
+        const y = crossings[bestIndex];
+        if (ep.pos === "start") {
+          run[0] = { year: y, age: ageBase };
+        } else {
+          run[run.length - 1] = { year: y, age: ageBase };
+        }
+      }
+    }
+  }
+  if (DEBUG_AGE0 && (level === 17_000_000 || level === 18_000_000)) {
+    runs.forEach((run, idx) => {
+      const first = run[0];
+      const last = run[run.length - 1];
+      if (isTop(first) || isTop(last)) {
+        // eslint-disable-next-line no-console
+        console.log(
+          `[AGE0-ENDS] level=${level} run=${idx + 1} start=(${first.year.toFixed(
+            6
+          )}, ${first.age.toFixed(6)}) end=(${last.year.toFixed(
+            6
+          )}, ${last.age.toFixed(6)})`
+        );
+      }
+    });
+  }
+
+  const isThick = level % heavyStep === 0;
+  runs = runs.filter((run) => {
+    if (run.length < 2) return false;
+    if (isThick) return true;
+    if (run.length < minRunPts) return false;
+    let minYearRun = Infinity;
+    let maxYearRun = -Infinity;
+    let minAgeRun = Infinity;
+    let maxAgeRun = -Infinity;
+    for (const p of run) {
+      minYearRun = Math.min(minYearRun, p.year);
+      maxYearRun = Math.max(maxYearRun, p.year);
+      minAgeRun = Math.min(minAgeRun, p.age);
+      maxAgeRun = Math.max(maxAgeRun, p.age);
+    }
+    const bboxArea = (maxYearRun - minYearRun) * (maxAgeRun - minAgeRun);
+    return bboxArea >= minBboxArea;
+  });
+
+  if (runs.length === 0) continue;
+  let totalPts = 0;
+  for (const run of runs) {
+    totalPts += run.length;
+    for (const p of run) {
+      if (!Number.isFinite(p.year) || !Number.isFinite(p.age)) {
+        throw new Error(
+          `Invalid contour point at level=${level}: ${JSON.stringify(p)}`
+        );
+      }
+    }
+    jsonReady.push({ level, points: run });
+  }
+  perLevelSummary.push({ level, runs: runs.length, points: totalPts });
 }
 
 const serialized = JSON.stringify(jsonReady, null, 2);
@@ -682,8 +1048,14 @@ if (serialized.includes('"age": null')) {
 fs.writeFileSync(contoursOutPath, serialized, "utf8");
 
 console.log(
-  `Wrote ${jsonReady.length} contour levels to ${path.relative(
+  `Wrote ${jsonReady.length} contour runs (${perLevelSummary.length} levels) to ${path.relative(
     process.cwd(),
     contoursOutPath
-  )} (maxSurvivors=${maxSurvivors}, step=${levelStep})`
+  )}`
 );
+for (const summary of perLevelSummary) {
+  const prefix = summary.runs > 5 ? "⚠" : " ";
+  console.log(
+    `${prefix} level=${summary.level} runs=${summary.runs} pts=${summary.points}`
+  );
+}

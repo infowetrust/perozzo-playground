@@ -61,6 +61,7 @@ type ArchitectureLayerProps = {
   floorZ: number;
   valueStep: number;
   valueMinorStep: number;
+  showRightWall?: boolean;
 };
 
 export default function ArchitectureLayer({
@@ -88,13 +89,17 @@ export default function ArchitectureLayer({
   floorZ,
   valueStep,
   valueMinorStep,
+  showRightWall = true,
 }: ArchitectureLayerProps) {
+  const isUsaDataset = frame.maxYear >= 2025;
+  const backwallMinYearExt = isUsaDataset ? frame.maxYear : minYearExt;
+  const floorExtendLeftYears = isUsaDataset ? 0 : extendLeftYears;
   return (
     <g id="layer-architecture">
       <BackWallIsolines
         frame={frame}
         projection={projection}
-        minYearExt={minYearExt}
+        minYearExt={backwallMinYearExt}
         maxYearExt={maxYearExt}
         fullLevels={backwallFullLevels}
         rightOnlyLevels={backwallRightLevels}
@@ -117,24 +122,26 @@ export default function ArchitectureLayer({
         frame={frame}
         projection={projection}
         heavyAges={[0, 25, 50, 75, 100]}
-        extendLeftYears={extendLeftYears}
+        extendLeftYears={floorExtendLeftYears}
         extendRightYears={extendRightYears}
         style={floorAgeStyle}
       />
-      <RightWall
-        surfacePoints={surfacePoints}
-        rows={rows}
-        cols={cols}
-        projection={projection}
-        floorZ={floorZ}
-        ages={ages}
-        maxSurvivors={maxSurvivors}
-        valueStep={valueStep}
-        valueMinorStep={valueMinorStep}
-        frame={frame}
-        shading={shadingConfig}
-        style={rightWallStyle}
-      />
+      {showRightWall && (
+        <RightWall
+          surfacePoints={surfacePoints}
+          rows={rows}
+          cols={cols}
+          projection={projection}
+          floorZ={floorZ}
+          ages={ages}
+          maxSurvivors={maxSurvivors}
+          valueStep={valueStep}
+          valueMinorStep={valueMinorStep}
+          frame={frame}
+          shading={shadingConfig}
+          style={rightWallStyle}
+        />
+      )}
     </g>
   );
 }

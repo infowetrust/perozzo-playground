@@ -1,3 +1,5 @@
+// NOTE: When OCCLUSION is enabled, this layer is not rendered.
+// Lines are drawn via interleaving with surface triangles.
 import type { Point2D, Point3D } from "../../core/types";
 import type { LineStyle } from "../vizConfig";
 import { isHeavy } from "../vizConfig";
@@ -149,33 +151,7 @@ export default function DataLinesLayer({
         </g>
       )}
 
-      {/* BLUE cohort lines */}
-      {showCohortLines &&
-        cohortLines.map((line) => {
-          const isHit = !!(focus && line.birthYear === focus.birthYear);
-          const width = line.heavy ? vizStyle.cohorts.thickWidth : vizStyle.cohorts.thinWidth;
-          const opBase = line.heavy ? vizStyle.cohorts.thickOpacity : vizStyle.cohorts.thinOpacity;
-          // Render as segments only if occlusion is enabled and indices exist; else polyline.
-          if (occlEnabled && line.indices && surfacePoints) {
-            return (
-              <g key={`cohort-${line.birthYear}`}>
-                {renderPolylineAsSegments(line, vizStyle.cohorts.stroke, width, opBase, isHit)}
-              </g>
-            );
-          }
-          return (
-            <polyline
-              key={`cohort-${line.birthYear}`}
-              points={line.points.map((p) => `${p.x},${p.y}`).join(" ")}
-              fill="none"
-              stroke={vizStyle.cohorts.stroke}
-              strokeWidth={width}
-              strokeOpacity={applyHover(opBase, isHit)}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          );
-        })}
+      {/* NOTE: cohorts are drawn via surface interleaving now. */}
 
       {/* GRAY age lines */}
       {drawAges &&

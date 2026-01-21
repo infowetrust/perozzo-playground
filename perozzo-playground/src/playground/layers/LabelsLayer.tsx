@@ -28,6 +28,8 @@ type LabelsLayerProps = {
     right: number[];
   };
   showTitle?: boolean;
+  valueLabelFormat?: "millions";
+  age100Text?: string;
   titleProps: {
     x: number;
     y: number;
@@ -46,6 +48,7 @@ type LabelsLayerProps = {
     };
   };
   topValueByYear: Record<number, number>;
+  yearLabelSides?: ("top" | "bottom")[];
 };
 
 export default function LabelsLayer({
@@ -59,8 +62,11 @@ export default function LabelsLayer({
   vizStyle,
   valueLevels,
   showTitle = true,
+  valueLabelFormat,
+  age100Text,
   titleProps,
   topValueByYear,
+  yearLabelSides,
 }: LabelsLayerProps) {
   const ageLabelStyle: AxisLabelStyle = {
     ...axisLabelBaseStyle,
@@ -85,6 +91,7 @@ export default function LabelsLayer({
         tickLen={axisLabelLayout.tickLen}
         textOffset={axisLabelLayout.textOffset}
         style={ageLabelStyle}
+        age100Text={age100Text}
       />
       <ValueIsolineLabels
         frame={frame}
@@ -97,6 +104,7 @@ export default function LabelsLayer({
         style={valueLabelStyle}
         leftLevels={valueLevels.left}
         rightLevels={valueLevels.right}
+        labelFormat={valueLabelFormat}
       />
       <YearLabels
         frame={frame}
@@ -110,6 +118,7 @@ export default function LabelsLayer({
         style={yearLabelStyle}
         bottomAngleDeg={-50}
         topValueByYear={topValueByYear}
+        labelSides={yearLabelSides}
       />
       {showTitle !== false && <TitleBlock {...titleProps} />}
     </g>

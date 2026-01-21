@@ -24,21 +24,22 @@ import {
 import { TITLE_BLOCK_WIDTH, TITLE_BLOCK_HEIGHT } from "./layers/TitleBlock";
 import ArchitectureLayer from "./layers/ArchitectureLayer";
 import SurfaceLayer from "./layers/SurfaceLayer";
-import DataLinesLayer from "./layers/DataLinesLayer";
 import LabelsLayer from "./layers/LabelsLayer";
 import InteractionLayer from "./layers/InteractionLayer";
-import {
-  buildDepthBuffer,
-  type DepthBuffer,
-  type OcclusionConfig,
-} from "./occlusion";
+import RightWall from "./layers/RightWall";
+import TopView from "./layers/TopView";
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
-import { makeFrame3D } from "../core/frame3d";
-import { HOVER_HIGHLIGHT_MULT, HOVER_DIM_MULT, TRI_RENDER } from "./vizConfig";
+import { makeFrame3D, type Frame3D } from "../core/frame3d";
+import { TRI_RENDER } from "./vizConfig";
+import { segmentizeContourPolyline } from "./contourSegmenter";
 
 type ContourPointFile = { year: number; age: number };
-type ContourFile = { level: number; points: ContourPointFile[] };
+type ContourFile = {
+  level: number;
+  points?: ContourPointFile[];
+  runs?: ContourPointFile[][];
+};
 type TidyRow = ReturnType<typeof parseSwedenCsv>[number];
 
 type PlateVizProps = {
@@ -59,6 +60,11 @@ type PlateVizProps = {
   valuesHeavyStep?: number;
   rightWallValueStep?: number;
   rightWallMinorStep?: number;
+  maxHeight?: number;
+  projectionTweaks?: {
+    ageScaleMultiplier?: number;
+    ageAxisAngleDeg?: number;
+  };
   activeKey?: string;
 };
 
@@ -75,7 +81,16 @@ const DEFAULT_VALUE_LEVELS = {
   backwallFull: [0, 50_000, 100_000, 150_000],
   backwallRightOnly: [200_000, 250_000],
 };
-const DEBUG_COHORT_ON_TOP = true;
+const DEBUG_CONTOUR_PROJ = false;
+const DEBUG_CONTOUR_LEVEL = 10_000_000;
+let contourDebugLogged = false;
+const FEATURES = {
+  labels: true,
+  hover: true,
+  exportSvg: true,
+  rightWall: true,
+  occlusion: true,
+};
 
 // Centralized visual style for the playground.
 // If you want to art-direct the plate, tweak values here.
@@ -87,6 +102,7 @@ const LINE_THICK_OPACITY = 0.9;
 
 const HOVER_RADIUS_PX = 16;
 const HOVER_MARGIN_PX = 16;
+const BIRTHS_SKYLINE_EPS = 1e-6;
 
 export interface AxisLabelStyle {
   color?: string; // made optional
@@ -211,14 +227,6 @@ const vizStyle = {
 };
 
 
-const OCCLUSION: OcclusionConfig = {
-  enabled: false,
-  gridW: 320,
-  gridH: 320,
-  epsilon: 0.02,
-  mode: "dim",
-  dimFactor: 0.35,
-};
 
 const TOOLTIP_WIDTH = 120;
 const TOOLTIP_HEIGHT = 96;
@@ -241,6 +249,21 @@ type Quad2D = {
   rowIndex: number;
   colIndex: number;
 };
+type Tri2 = {
+  pts2: [Point2D, Point2D, Point2D];
+  pts3: [Point3D, Point3D, Point3D];
+  degenerate?: boolean;
+};
+type CellRender = {
+  cellKey: string;
+  depthKey: number;
+  tris: Tri2[];
+  split4?: boolean;
+  splitCenter?: Point2D;
+};
+
+const CELL_SORT_MODE: "avgXYZ" | "maxY" = "avgXYZ";
+const ISLAND_AREA_MULT = 1.05;
 
 type YearLine = {
   year: number;
@@ -295,6 +318,7 @@ type AgeSegment = {
   y2: number;
   heavy: boolean;
   age: number;
+  visible?: boolean;
 };
 type ValueSegment = {
   x1: number;
@@ -304,12 +328,9 @@ type ValueSegment = {
   level: number;
 };
 
-type RenderMode = "normal" | "debugQuads" | "debugTris";
-type TriDiagMode = "fixedA" | "fixedB" | "autoBest";
-type DebugReveal = "first" | "last";
-type TriSortMetric = "avgY" | "maxY";
-
 type Vec3 = { x: number; y: number; z: number };
+let triCellHistLogged = false;
+let split4CountLogged = false;
 
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
 
@@ -346,6 +367,48 @@ function avg3(a: Point2D, b: Point2D, c: Point2D): Point2D {
 }
 function triDepthKeyMaxY(a: Point2D, b: Point2D, c: Point2D): number {
   return Math.max(a.y, b.y, c.y);
+}
+function avg3D(
+  a: Point3D,
+  b: Point3D,
+  c: Point3D,
+  d: Point3D
+): Point3D {
+  return {
+    x: (a.x + b.x + c.x + d.x) / 4,
+    y: (a.y + b.y + c.y + d.y) / 4,
+    z: (a.z + b.z + c.z + d.z) / 4,
+  };
+}
+function diagIntersection2D(
+  a: Point2D,
+  c: Point2D,
+  b: Point2D,
+  d: Point2D
+): Point2D | null {
+  const x1 = a.x;
+  const y1 = a.y;
+  const x2 = c.x;
+  const y2 = c.y;
+  const x3 = b.x;
+  const y3 = b.y;
+  const x4 = d.x;
+  const y4 = d.y;
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 1e-9) return null;
+  const px =
+    ((x1 * y2 - y1 * x2) * (x3 - x4) -
+      (x1 - x2) * (x3 * y4 - y3 * x4)) /
+    denom;
+  const py =
+    ((x1 * y2 - y1 * x2) * (y3 - y4) -
+      (y1 - y2) * (x3 * y4 - y3 * x4)) /
+    denom;
+  if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+  return { x: px, y: py };
+}
+function dist2D(a: Point2D, b: Point2D): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
 // simple depth metric: larger = nearer to viewer
@@ -571,47 +634,87 @@ function buildCohortLines(
 
 function buildValueContours2D(
   contours: ContourFile[],
-  projectedSurface: Point2D[],
+  _projectedSurface: Point2D[],
   surfacePoints: Point3D[],
   ages: number[],
   years: number[],
   _rows: number,
   cols: number,
-  zScale: number
+  zScale: number,
+  frame: Frame3D,
+  projection: ProjectionOptions
 ): ValueContour2D[] {
-  return contours.map((iso) => {
+  const maxYearValue = years[years.length - 1];
+  const EPS = 1e-6;
+
+  const ensureRightBoundaryPoint = (
+    pts: ContourPointFile[]
+  ): ContourPointFile[] => {
+    if (pts.length < 2) return pts;
+    if (pts.some((p) => Math.abs(p.year - maxYearValue) < EPS)) {
+      return pts;
+    }
+    let insertIndex = -1;
+    let intersectAge = 0;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const minY = Math.min(a.year, b.year);
+      const maxY = Math.max(a.year, b.year);
+      if (maxYearValue < minY - EPS || maxYearValue > maxY + EPS) {
+        continue;
+      }
+      const dy = b.year - a.year;
+      if (Math.abs(dy) < EPS) continue;
+      const t = (maxYearValue - a.year) / dy;
+      if (t < -EPS || t > 1 + EPS) continue;
+      intersectAge = a.age + t * (b.age - a.age);
+      insertIndex = i + 1;
+    }
+    if (insertIndex === -1) {
+      return pts;
+    }
+    const next = pts.slice();
+    next.splice(insertIndex, 0, {
+      year: maxYearValue,
+      age: intersectAge,
+    });
+    return next;
+  };
+
+  const crossingAgesAtCol = (level: number, col: number): number[] => {
+    if (zScale === 0) return [];
+    const out: number[] = [];
+    for (let row = 0; row < ages.length - 1; row++) {
+      const idx0 = row * cols + col;
+      const idx1 = (row + 1) * cols + col;
+      const p0 = surfacePoints[idx0];
+      const p1 = surfacePoints[idx1];
+      if (!p0 || !p1) continue;
+      const value0 = p0.z / zScale;
+      const value1 = p1.z / zScale;
+      if (value0 === value1) continue;
+      const lo = Math.min(value0, value1);
+      const hi = Math.max(value0, value1);
+      if (level < lo - EPS || level > hi + EPS) continue;
+      const t = (level - value0) / (value1 - value0);
+      if (t < -EPS || t > 1 + EPS) continue;
+      const age = ages[row] + t * (ages[row + 1] - ages[row]);
+      out.push(age);
+    }
+    return out;
+  };
+
+  const buildRun = (
+    iso: ContourFile,
+    contourPts: ContourPointFile[]
+  ): ValueContour2D | null => {
     const pts: Point2D[] = [];
     const dataPts: { year: number; age: number }[] = [];
 
-    const contourPts = iso.points;
+    const contourWithBoundary = ensureRightBoundaryPoint(contourPts);
 
-    const maxYearValue = years[years.length - 1];
-    const EPS = 1e-6;
-
-    const crossingAgesAtCol = (level: number, col: number): number[] => {
-      if (zScale === 0) return [];
-      const out: number[] = [];
-      for (let row = 0; row < ages.length - 1; row++) {
-        const idx0 = row * cols + col;
-        const idx1 = (row + 1) * cols + col;
-        const p0 = surfacePoints[idx0];
-        const p1 = surfacePoints[idx1];
-        if (!p0 || !p1) continue;
-        const value0 = p0.z / zScale;
-        const value1 = p1.z / zScale;
-        if (value0 === value1) continue;
-        const lo = Math.min(value0, value1);
-        const hi = Math.max(value0, value1);
-        if (level < lo - EPS || level > hi + EPS) continue;
-        const t = (level - value0) / (value1 - value0);
-        if (t < -EPS || t > 1 + EPS) continue;
-        const age = ages[row] + t * (ages[row + 1] - ages[row]);
-        out.push(age);
-      }
-      return out;
-    };
-
-    for (const pt of contourPts) {
+    for (const pt of contourWithBoundary) {
       let adjustedAge = pt.age;
       const clampedYear =
         pt.year > maxYearValue && pt.year - maxYearValue < EPS
@@ -628,46 +731,73 @@ function buildValueContours2D(
           adjustedAge = nearest;
         }
       }
-      const colLeft = findColSegmentIndex(clampedYear, years);
-      if (colLeft < 0) continue;
-
-      const colRight = Math.min(colLeft + 1, cols - 1);
-      const y0 = years[colLeft];
-      const y1 = years[colRight];
-      const ty = y1 === y0 ? 0 : (clampedYear - y0) / (y1 - y0);
-
-      const rowBelow = findRowSegmentIndex(adjustedAge, ages);
-      if (rowBelow < 0 || rowBelow >= _rows - 1) continue;
-
-      const age0 = ages[rowBelow];
-      const age1 = ages[rowBelow + 1];
-      const ta = (adjustedAge - age0) / (age1 - age0);
-
-      const p00 = projectedSurface[rowBelow * cols + colLeft];
-      const p10 = projectedSurface[rowBelow * cols + colRight];
-      const p01 = projectedSurface[(rowBelow + 1) * cols + colLeft];
-      const p11 = projectedSurface[(rowBelow + 1) * cols + colRight];
-
-      // Interpolate along year at the two age rows
-      const q0x = p00.x + ty * (p10.x - p00.x);
-      const q0y = p00.y + ty * (p10.y - p00.y);
-      const q1x = p01.x + ty * (p11.x - p01.x);
-      const q1y = p01.y + ty * (p11.y - p01.y);
-
-      // Then interpolate along age between those two
-      const x = q0x + ta * (q1x - q0x);
-      const y = q0y + ta * (q1y - q0y);
-
-      pts.push({ x, y });
-      dataPts.push({ year: pt.year, age: pt.age });
+      const directPoint = projectIso(
+        frame.point(clampedYear, adjustedAge, iso.level),
+        projection
+      );
+      pts.push(directPoint);
+      dataPts.push({ year: clampedYear, age: adjustedAge });
     }
 
+    if (pts.length < 2) return null;
     return {
       level: iso.level,
       points: pts,
       data: dataPts,
     };
+  };
+
+  return contours.flatMap((iso) => {
+    const runs =
+      iso.runs ??
+      (iso.points && iso.points.length > 0 ? [iso.points] : []);
+    return runs
+      .map((run) => buildRun(iso, run))
+      .filter((run): run is ValueContour2D => run !== null);
   });
+}
+
+function isClosedRun(
+  points: ContourPointFile[],
+  eps = 1e-6
+): boolean {
+  if (points.length < 2) return false;
+  const first = points[0];
+  const last = points[points.length - 1];
+  return (
+    Math.abs(first.year - last.year) <= eps &&
+    Math.abs(first.age - last.age) <= eps
+  );
+}
+
+function runAreaYearAge(points: ContourPointFile[]): number {
+  if (points.length < 3) return 0;
+  const closed = isClosedRun(points);
+  const pts = closed ? points.slice(0, -1) : points;
+  if (pts.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    sum += a.year * b.age - b.year * a.age;
+  }
+  return Math.abs(sum) / 2;
+}
+
+function flattenContourRuns(contours: ContourFile[]): ContourFile[] {
+  const out: ContourFile[] = [];
+  for (const iso of contours) {
+    if (iso.runs && iso.runs.length > 0) {
+      for (const run of iso.runs) {
+        out.push({ level: iso.level, points: run });
+      }
+      continue;
+    }
+    if (iso.points && iso.points.length > 0) {
+      out.push({ level: iso.level, points: iso.points });
+    }
+  }
+  return out;
 }
 
 function projectSurfaceYearAge(
@@ -767,6 +897,8 @@ export default function PlateViz({
   valuesHeavyStep,
   rightWallValueStep,
   rightWallMinorStep,
+  maxHeight = 3,
+  projectionTweaks,
   activeKey,
 }: PlateVizProps) {
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -781,13 +913,14 @@ export default function PlateViz({
     screenX: number;
     screenY: number;
   }>(null);
-  const [renderMode, setRenderMode] = useState<RenderMode>("normal");
-  const [debugQuadCount, setDebugQuadCount] = useState<number>(300);
-  const [triDiagMode, setTriDiagMode] = useState<TriDiagMode>("autoBest");
-  const [debugReveal, setDebugReveal] = useState<DebugReveal>("first");
-  const [triSortMetric, setTriSortMetric] = useState<TriSortMetric>("maxY");
-  const [triBackfaceCull, setTriBackfaceCull] = useState<boolean>(true);
-  const DEBUG_TRI_STROKE_WIDTH = 0.4;
+  const globalTriSort = true;
+  const [topShowYears, setTopShowYears] = useState<boolean>(true);
+  const [topShowAges, setTopShowAges] = useState<boolean>(true);
+  const [topShowCohorts, setTopShowCohorts] = useState<boolean>(true);
+  const [topShowContours, setTopShowContours] = useState<boolean>(true);
+  const [topContourMode, setTopContourMode] =
+    useState<"raw" | "segmented">("raw");
+  const topViewSvgRef = useRef<SVGSVGElement | null>(null);
 
   const datasetTitleKey = title?.bigWord?.toUpperCase() ?? "";
   const normalizedKey = activeKey?.toLowerCase();
@@ -834,6 +967,30 @@ export default function PlateViz({
     () => contours as ContourFile[],
     [contours]
   );
+  const contourRuns = useMemo(
+    () => flattenContourRuns(contourData),
+    [contourData]
+  );
+  const stereoContourRuns = useMemo(() => {
+    const targetLevel = 12_000_000;
+    const closedRuns = contourRuns.filter(
+      (run) =>
+        run.level === targetLevel &&
+        run.points &&
+        isClosedRun(run.points)
+    );
+    const maxArea = closedRuns.reduce((max, run) => {
+      if (!run.points) return max;
+      return Math.max(max, runAreaYearAge(run.points));
+    }, 0);
+    const threshold = maxArea * ISLAND_AREA_MULT;
+    return contourRuns.filter((run) => {
+      if (!run.points || run.points.length < 3) return true;
+      if (!isClosedRun(run.points)) return true;
+      const area = runAreaYearAge(run.points);
+      return area > threshold;
+    });
+  }, [contourRuns]);
   const WIDTH = canvas?.width ?? DEFAULT_WIDTH;
   const HEIGHT = canvas?.height ?? DEFAULT_HEIGHT;
   const FRAME_MAX_AGE = frameMax?.age ?? DEFAULT_FRAME_MAX_AGE;
@@ -854,13 +1011,52 @@ export default function PlateViz({
     return map;
   }, [swedenRows]);
 
-  const projection: ProjectionOptions = useMemo(
-    () => projectionForPreset(presetProp, WIDTH, HEIGHT),
-    [presetProp, WIDTH, HEIGHT]
-  );
+  const projection: ProjectionOptions = useMemo(() => {
+    const base = projectionForPreset(presetProp, WIDTH, HEIGHT);
+    const ageScaleMultiplier = projectionTweaks?.ageScaleMultiplier;
+    const ageAxisAngleDeg = projectionTweaks?.ageAxisAngleDeg;
+    const scale =
+      ageScaleMultiplier && ageScaleMultiplier !== 1
+        ? ageScaleMultiplier
+        : 1;
+    const nextBasisY = {
+      x: base.basis.basisY.x * scale,
+      y: base.basis.basisY.y * scale,
+    };
+    if (ageAxisAngleDeg === undefined) {
+      if (scale === 1) {
+        return base;
+      }
+      return {
+        ...base,
+        basis: {
+          ...base.basis,
+          basisY: nextBasisY,
+        },
+      };
+    }
+    const mag = Math.hypot(nextBasisY.x, nextBasisY.y) || 1;
+    const rad = (ageAxisAngleDeg * Math.PI) / 180;
+    return {
+      ...base,
+      basis: {
+        ...base.basis,
+        basisY: {
+          x: Math.cos(rad) * mag,
+          y: Math.sin(rad) * mag,
+        },
+      },
+    };
+  }, [
+    presetProp,
+    WIDTH,
+    HEIGHT,
+    projectionTweaks?.ageScaleMultiplier,
+    projectionTweaks?.ageAxisAngleDeg,
+  ]);
 
   const model = useMemo(() => {
-    const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight: 3 });
+    const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight });
     const { points: surfacePoints, rows, cols, years, ages } = swedenSurface;
     const maxSurvivors = swedenRows.reduce(
       (max, row) => Math.max(max, row.survivors),
@@ -885,72 +1081,260 @@ export default function PlateViz({
       cols
     );
     const quads = buildQuads(surfacePoints, rows, cols, projection);
+    const cellMap = new Map<string, CellRender>();
+    let split4Count = 0;
     const triangles = TRI_RENDER.enabled
       ? (() => {
-          const tris: {
+        const tris: {
+          pts2: [Point2D, Point2D, Point2D];
+          pts3: [Point3D, Point3D, Point3D];
+          depthKey: number;
+          cellKey: string;
+          cx: number;
+          cy: number;
+          isPrimaryForCell: boolean;
+        }[] = [];
+        for (const quad of quads) {
+          const [p00, p10, p11, p01] = quad.corners3D;
+          const [P00, P10, P11, P01] = quad.points2D;
+          const center3D = avg3D(p00, p10, p11, p01);
+          const center2D = projectIso(center3D, projection);
+          const diagCenter2D = diagIntersection2D(P00, P11, P10, P01);
+          const shouldSplit4 =
+            TRI_RENDER.split4Enabled &&
+            diagCenter2D !== null &&
+            dist2D(center2D, diagCenter2D) >= TRI_RENDER.split4CenterDiffPx;
+          const cellKey = `${quad.rowIndex}-${quad.colIndex}`;
+          if (shouldSplit4) {
+            const tris4: Tri2[] = [
+              {
+                pts2: [P00, P10, center2D] as [
+                  Point2D,
+                  Point2D,
+                  Point2D
+                ],
+                pts3: [p00, p10, center3D] as [
+                  Point3D,
+                  Point3D,
+                  Point3D
+                ],
+              },
+              {
+                pts2: [P10, P11, center2D] as [
+                  Point2D,
+                  Point2D,
+                  Point2D
+                ],
+                pts3: [p10, p11, center3D] as [
+                  Point3D,
+                  Point3D,
+                  Point3D
+                ],
+              },
+              {
+                pts2: [P11, P01, center2D] as [
+                  Point2D,
+                  Point2D,
+                  Point2D
+                ],
+                pts3: [p11, p01, center3D] as [
+                  Point3D,
+                  Point3D,
+                  Point3D
+                ],
+              },
+              {
+                pts2: [P01, P00, center2D] as [
+                  Point2D,
+                  Point2D,
+                  Point2D
+                ],
+                pts3: [p01, p00, center3D] as [
+                  Point3D,
+                  Point3D,
+                  Point3D
+                ],
+              },
+            ].map((tri) => {
+              const area2 = triArea2(tri.pts2[0], tri.pts2[1], tri.pts2[2]);
+              const absArea2 = Math.abs(area2);
+              if (area2 < 0) {
+                return {
+                  ...tri,
+                  pts2: [
+                    tri.pts2[0],
+                    tri.pts2[2],
+                    tri.pts2[1],
+                  ] as [Point2D, Point2D, Point2D],
+                  degenerate: absArea2 < TRI_RENDER.minArea2D,
+                };
+              }
+              return {
+                ...tri,
+                degenerate: absArea2 < TRI_RENDER.minArea2D,
+              };
+            });
+            const p00d = surfacePoints[quad.rowIndex * cols + quad.colIndex];
+            const p10d =
+              surfacePoints[quad.rowIndex * cols + (quad.colIndex + 1)];
+            const p11d =
+              surfacePoints[(quad.rowIndex + 1) * cols + (quad.colIndex + 1)];
+            const p01d =
+              surfacePoints[(quad.rowIndex + 1) * cols + quad.colIndex];
+            const avgDepth3D =
+              (pointDepth3D(p00d) +
+                pointDepth3D(p10d) +
+                pointDepth3D(p11d) +
+                pointDepth3D(p01d)) /
+              4;
+            const maxYDepth = Math.max(
+              ...tris4.flatMap((t) => t.pts2.map((p) => p.y))
+            );
+            const cellDepthKey =
+              CELL_SORT_MODE === "avgXYZ" ? avgDepth3D : maxYDepth;
+            cellMap.set(cellKey, {
+              cellKey,
+              depthKey: cellDepthKey,
+              tris: tris4,
+              split4: true,
+              splitCenter: center2D,
+            });
+            split4Count += 1;
+            continue;
+          }
+          const diagA = [
+            {
+              pts2: [P00, P10, P11] as [Point2D, Point2D, Point2D],
+              pts3: [p00, p10, p11] as [Point3D, Point3D, Point3D],
+            },
+            {
+              pts2: [P00, P11, P01] as [Point2D, Point2D, Point2D],
+              pts3: [p00, p11, p01] as [Point3D, Point3D, Point3D],
+            },
+          ];
+          const diagB = [
+            {
+              pts2: [P00, P10, P01] as [Point2D, Point2D, Point2D],
+              pts3: [p00, p10, p01] as [Point3D, Point3D, Point3D],
+            },
+            {
+              pts2: [P10, P11, P01] as [Point2D, Point2D, Point2D],
+              pts3: [p10, p11, p01] as [Point3D, Point3D, Point3D],
+            },
+          ];
+          const areaScore = (t: { pts2: [Point2D, Point2D, Point2D] }) =>
+            Math.abs(triArea2(t.pts2[0], t.pts2[1], t.pts2[2]));
+          const scoreA = Math.min(areaScore(diagA[0]), areaScore(diagA[1]));
+          const scoreB = Math.min(areaScore(diagB[0]), areaScore(diagB[1]));
+          const candidates = scoreA >= scoreB ? diagA : diagB;
+          const kept: {
             pts2: [Point2D, Point2D, Point2D];
             pts3: [Point3D, Point3D, Point3D];
             depthKey: number;
-            cellKey: string;
             cx: number;
             cy: number;
+            degenerate?: boolean;
           }[] = [];
-          for (const quad of quads) {
-            const [p00, p10, p11, p01] = quad.corners3D;
-            const [P00, P10, P11, P01] = quad.points2D;
-            const nA1 = triNormal(p00, p10, p11);
-            const nA2 = triNormal(p00, p11, p01);
-            const scoreA = dot3(nA1, nA2);
-            const nB1 = triNormal(p00, p10, p01);
-            const nB2 = triNormal(p10, p11, p01);
-            const scoreB = dot3(nB1, nB2);
-            const useA = scoreA >= scoreB;
-            const candidates = useA
-              ? [
-                  {
-                    pts2: [P00, P10, P11] as [Point2D, Point2D, Point2D],
-                    pts3: [p00, p10, p11] as [Point3D, Point3D, Point3D],
-                  },
-                  {
-                    pts2: [P00, P11, P01] as [Point2D, Point2D, Point2D],
-                    pts3: [p00, p11, p01] as [Point3D, Point3D, Point3D],
-                  },
-                ]
-              : [
-                  {
-                    pts2: [P00, P10, P01] as [Point2D, Point2D, Point2D],
-                    pts3: [p00, p10, p01] as [Point3D, Point3D, Point3D],
-                  },
-                  {
-                    pts2: [P10, P11, P01] as [Point2D, Point2D, Point2D],
-                    pts3: [p10, p11, p01] as [Point3D, Point3D, Point3D],
-                  },
-                ];
-            for (const tri of candidates) {
-              const [a, b, c] = tri.pts2;
-              const area2 = triArea2(a, b, c);
-              if (Math.abs(area2) < TRI_RENDER.degenerateAreaEps) {
-                continue;
-              }
-              if (TRI_RENDER.backfaceCull && area2 <= 0) {
-                continue;
-              }
-              const depthKey = triDepthKeyMaxY(a, b, c);
-              const centroid = avg3(a, b, c);
-              tris.push({
-                pts2: tri.pts2,
-                pts3: tri.pts3,
-                depthKey,
-                cellKey: `${quad.rowIndex}-${quad.colIndex}`,
-                cx: centroid.x,
-                cy: centroid.y,
+          const triInfo = candidates.map((tri) => {
+            const [a, b, c] = tri.pts2;
+            const area2 = triArea2(a, b, c);
+            const absArea2 = Math.abs(area2);
+            const depthKey = triDepthKeyMaxY(a, b, c);
+            const centroid = avg3(a, b, c);
+            return {
+              tri,
+              area2,
+              absArea2,
+              depthKey,
+              centroid,
+            };
+          });
+          const frontFacingFlags = triInfo.map((info) => info.area2 > 0);
+          const shouldCullBoth =
+            TRI_RENDER.backfaceCull &&
+            TRI_RENDER.cullMode === "bothOnly" &&
+            !TRI_RENDER.keepBothTris &&
+            frontFacingFlags.every((f) => !f);
+          if (!shouldCullBoth) {
+            for (const info of triInfo) {
+              kept.push({
+                pts2: info.tri.pts2,
+                pts3: info.tri.pts3,
+                depthKey: info.depthKey,
+                cx: info.centroid.x,
+                cy: info.centroid.y,
+                degenerate: info.absArea2 < TRI_RENDER.minArea2D,
               });
             }
           }
-          tris.sort((a, b) => a.depthKey - b.depthKey);
-          return tris;
-        })()
+          if (kept.length > 0) {
+            let primaryIndex = 0;
+            for (let i = 1; i < kept.length; i++) {
+              if (kept[i].depthKey > kept[primaryIndex].depthKey) {
+                primaryIndex = i;
+              }
+            }
+            kept.forEach((tri, index) => {
+              tris.push({
+                ...tri,
+                cellKey,
+                isPrimaryForCell: index === primaryIndex,
+              });
+            });
+            const cellTris: Tri2[] = kept.map((tri) => ({
+              pts2: tri.pts2,
+              pts3: tri.pts3,
+              degenerate: tri.degenerate,
+            }));
+            if (cellTris.length > 0) {
+              const p00 = surfacePoints[quad.rowIndex * cols + quad.colIndex];
+              const p10 =
+                surfacePoints[quad.rowIndex * cols + (quad.colIndex + 1)];
+              const p11 =
+                surfacePoints[(quad.rowIndex + 1) * cols + (quad.colIndex + 1)];
+              const p01 =
+                surfacePoints[(quad.rowIndex + 1) * cols + quad.colIndex];
+              const avgDepth3D =
+                (pointDepth3D(p00) +
+                  pointDepth3D(p10) +
+                  pointDepth3D(p11) +
+                  pointDepth3D(p01)) /
+                4;
+              const maxYDepth = Math.max(
+                ...cellTris.flatMap((t) => t.pts2.map((p) => p.y))
+              );
+              const cellDepthKey =
+                CELL_SORT_MODE === "avgXYZ" ? avgDepth3D : maxYDepth;
+              cellMap.set(cellKey, {
+                cellKey,
+                depthKey: cellDepthKey,
+                tris: cellTris,
+              });
+            }
+          }
+        }
+        tris.sort((a, b) => a.depthKey - b.depthKey);
+        return tris;
+      })()
       : [];
+    const cells = TRI_RENDER.enabled
+      ? [...cellMap.values()].sort((a, b) => a.depthKey - b.depthKey)
+      : [];
+    if (!triCellHistLogged && cells.length > 0) {
+      triCellHistLogged = true;
+      const hist: Record<number, number> = {};
+      for (const cell of cells) {
+        const count = cell.tris.length;
+        hist[count] = (hist[count] ?? 0) + 1;
+      }
+      // eslint-disable-next-line no-console
+      console.log("[TRI_CELL_TRI_COUNT_HIST]", hist);
+    }
+    if (!split4CountLogged && TRI_RENDER.enabled && cells.length > 0) {
+      split4CountLogged = true;
+      // eslint-disable-next-line no-console
+      console.log("[TRI_SPLIT4_COUNT]", split4Count);
+    }
     const yearLines = buildYearLines(projectedSurface, years, rows, cols);
     const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
     const cohortLines = buildCohortLines(
@@ -961,6 +1345,20 @@ export default function PlateViz({
       rows,
       cols
     );
+    const maxZByCol = new Array(cols).fill(-Infinity);
+    const birthZByCol = new Array(cols).fill(-Infinity);
+    for (let col = 0; col < cols; col++) {
+      for (let row = 0; row < rows; row++) {
+        const idx = row * cols + col;
+        const z = surfacePoints[idx]?.z ?? -Infinity;
+        if (z > maxZByCol[col]) {
+          maxZByCol[col] = z;
+        }
+        if (row === 0) {
+          birthZByCol[col] = z;
+        }
+      }
+    }
     const yearSegByQuad = new Map<string, YearSegment[]>();
     for (const line of yearLines) {
       const col = years.indexOf(line.year);
@@ -996,6 +1394,12 @@ export default function PlateViz({
         const p0 = line.points[col];
         const p1 = line.points[col + 1];
         if (!p0 || !p1) continue;
+        let visible: boolean | undefined;
+        if (line.age === 0) {
+          const isSkyline = (c: number) =>
+            birthZByCol[c] >= maxZByCol[c] - BIRTHS_SKYLINE_EPS;
+          visible = isSkyline(col) || isSkyline(col + 1);
+        }
         const key = `${qr}-${col}`;
         const seg: AgeSegment = {
           x1: p0.x,
@@ -1004,6 +1408,7 @@ export default function PlateViz({
           y2: p1.y,
           heavy: line.heavy,
           age: line.age,
+          visible,
         };
         const bucket = ageSegByQuad.get(key);
         if (bucket) {
@@ -1047,68 +1452,39 @@ export default function PlateViz({
     const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
     const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
     const contourPolylines2D = buildValueContours2D(
-      contourData,
+      stereoContourRuns,
       projectedSurface,
       surfacePoints,
       ages,
       years,
       rows,
       cols,
-      zScale
+      zScale,
+      frame,
+      projection
     );
     const valueSegByQuad = new Map<string, ValueSegment[]>();
-    const ageStep = ages.length > 1 ? ages[1] - ages[0] : 0;
-    for (const iso of contourPolylines2D) {
-      const pts = iso.points;
-      const data = iso.data;
-      for (let i = 0; i < pts.length - 1; i++) {
-        const p0 = pts[i];
-        const p1 = pts[i + 1];
-        const d0 = data[i];
-        const d1 = data[i + 1];
-        if (!p0 || !p1 || !d0 || !d1) continue;
-        const midYear = (d0.year + d1.year) / 2;
-        const qc = findColSegmentIndex(midYear, years);
-        if (qc < 0 || ageStep <= 0) continue;
-        const a0 = d0.age;
-        const a1 = d1.age;
-        const tBreaks: number[] = [];
-        if (a0 !== a1) {
-          const minA = Math.min(a0, a1);
-          const maxA = Math.max(a0, a1);
-          const startK = Math.ceil(minA / ageStep);
-          const endK = Math.floor(maxA / ageStep);
-          for (let k = startK; k <= endK; k++) {
-            const ageLine = k * ageStep;
-            if (ageLine <= minA || ageLine >= maxA) continue;
-            const t = (ageLine - a0) / (a1 - a0);
-            if (t > 0 && t < 1) tBreaks.push(t);
-          }
-          tBreaks.sort((a, b) => a - b);
-        }
-        const tAll = [0, ...tBreaks, 1];
-        for (let s = 0; s < tAll.length - 1; s++) {
-          const t0 = tAll[s];
-          const t1 = tAll[s + 1];
-          const midT = (t0 + t1) / 2;
-          const midAge = a0 + (a1 - a0) * midT;
-          const qr = findRowSegmentIndex(midAge, ages);
-          if (qr < 0) continue;
-          const x1 = p0.x + (p1.x - p0.x) * t0;
-          const y1 = p0.y + (p1.y - p0.y) * t0;
-          const x2 = p0.x + (p1.x - p0.x) * t1;
-          const y2 = p0.y + (p1.y - p0.y) * t1;
-          const key = `${qr}-${qc}`;
-          const seg: ValueSegment = { x1, y1, x2, y2, level: iso.level };
-          const bucket = valueSegByQuad.get(key);
-          if (bucket) {
-            bucket.push(seg);
-          } else {
-            valueSegByQuad.set(key, [seg]);
-          }
+    contourPolylines2D.forEach((iso, isoIndex) => {
+      const segments = segmentizeContourPolyline(
+        iso.level,
+        iso.points,
+        iso.data,
+        years,
+        ages,
+        isoIndex,
+        { splitByAgeLines: false }
+      );
+      for (const seg of segments) {
+        const { cellKey } = seg;
+        const bucket = valueSegByQuad.get(cellKey);
+        const { cellKey: _cellKey, ...rest } = seg;
+        if (bucket) {
+          bucket.push(rest);
+        } else {
+          valueSegByQuad.set(cellKey, [rest]);
         }
       }
-    }
+    });
     return {
       surfacePoints,
       rows,
@@ -1125,6 +1501,7 @@ export default function PlateViz({
       silhouettePts,
       quads,
       triangles,
+      cells,
       yearLines,
       ageLines,
       cohortLines,
@@ -1135,7 +1512,76 @@ export default function PlateViz({
       contourPolylines2D,
       maxZ,
     };
-  }, [projection, swedenRows, contourData]);
+  }, [projection, swedenRows, stereoContourRuns]);
+  const debugContourOverlay = useMemo(() => {
+    if (!DEBUG_CONTOUR_PROJ) return null;
+    const level = DEBUG_CONTOUR_LEVEL;
+    const rawRuns = model.contourPolylines2D
+      .filter((iso) => iso.level === level)
+      .map((iso) => iso.points);
+    const directRuns: Point2D[][] = [];
+    const rawWallDots: Point2D[] = [];
+    const directWallDots: Point2D[] = [];
+    const maxYear = model.frame.maxYear;
+    let maxDelta = 0;
+    let sumDelta = 0;
+    let count = 0;
+    for (const iso of model.contourPolylines2D) {
+      if (iso.level !== level) continue;
+      iso.data.forEach((d, i) => {
+        if (!Number.isFinite(d.year) || !Number.isFinite(d.age)) return;
+        const direct = projectIso(
+          model.frame.point(d.year, d.age, level),
+          projection
+        );
+        const surface = iso.points[i];
+        if (!surface) return;
+        const dx = direct.x - surface.x;
+        const dy = direct.y - surface.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist > maxDelta) maxDelta = dist;
+        sumDelta += dist;
+        count += 1;
+        if (Math.abs(d.year - maxYear) < 1e-6) {
+          rawWallDots.push(surface);
+          directWallDots.push(direct);
+        }
+      });
+    }
+    for (const run of stereoContourRuns) {
+      if (run.level !== level || !run.points) continue;
+      const pts: Point2D[] = [];
+      for (const p of run.points) {
+        if (!Number.isFinite(p.year) || !Number.isFinite(p.age)) continue;
+        const pt = projectIso(
+          model.frame.point(p.year, p.age, level),
+          projection
+        );
+        pts.push(pt);
+      }
+      if (pts.length > 1) directRuns.push(pts);
+    }
+    return {
+      level,
+      rawRuns,
+      directRuns,
+      rawWallDots,
+      directWallDots,
+      stats: {
+        count,
+        maxDelta,
+        meanDelta: count > 0 ? sumDelta / count : 0,
+      },
+    };
+  }, [model.contourPolylines2D, model.frame, projection, stereoContourRuns]);
+  if (DEBUG_CONTOUR_PROJ && debugContourOverlay && !contourDebugLogged) {
+    contourDebugLogged = true;
+    // eslint-disable-next-line no-console
+    console.log("[CONTOUR_PROJ_DEBUG]", {
+      level: debugContourOverlay.level,
+      ...debugContourOverlay.stats,
+    });
+  }
   const layersEnabled = {
     architecture: true,
     surface: true,
@@ -1144,18 +1590,6 @@ export default function PlateViz({
     labels: true,
     interaction: true,
   };
-  const depthBuffer: DepthBuffer | null = useMemo(() => {
-    if (!model.projectedSurface.length || !model.surfacePoints.length) {
-      return null;
-    }
-    return buildDepthBuffer(
-      model.projectedSurface,
-      model.surfacePoints,
-      OCCLUSION.gridW,
-      OCCLUSION.gridH
-    );
-  }, [model.projectedSurface, model.surfacePoints]);
-
   const { offsetX, offsetY } = useMemo(() => {
     return computeAutoCenterOffset(
       model.projectedSurface,
@@ -1300,6 +1734,26 @@ export default function PlateViz({
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
+  const handleDownloadTopViewSvg = () => {
+    if (!topViewSvgRef.current) {
+      return;
+    }
+    const clone = topViewSvgRef.current.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    const serialized = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([serialized], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "usa-topview-contours.svg";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   const tooltipData = hover
     ? {
@@ -1329,13 +1783,6 @@ export default function PlateViz({
     fontWeight: TOOLTIP_STYLE.fontWeight,
     opacity: TOOLTIP_STYLE.opacity,
   };
-  const focusYear = hover?.year ?? null;
-  const focusAge = hover?.age ?? null;
-  const focusBirthYear = hover ? hover.year - hover.age : null;
-  const hoverFocus =
-    focusYear !== null && focusAge !== null && focusBirthYear !== null
-      ? { year: focusYear, age: focusAge, birthYear: focusBirthYear }
-      : null;
   const ageStart = hover ? Math.max(0, hover.age - 4) : 0;
   const ageLineText =
     hover && hover.age === 0
@@ -1391,31 +1838,6 @@ export default function PlateViz({
     },
     debugPoints: vizStyle.debugPoints,
   };
-  const surfaceClipId = "surfaceClip";
-  const silhouettePointsStr = model.silhouettePts
-    .map((p) => `${p.x},${p.y}`)
-    .join(" ");
-  const leftEdgePts: Point2D[] = [];
-  const rightEdgePts: Point2D[] = [];
-  const topEdgePts: Point2D[] = [];
-  const bottomEdgePts: Point2D[] = [];
-  for (let row = 0; row < model.rows; row++) {
-    const left = model.projectedSurface[row * model.cols];
-    const right = model.projectedSurface[row * model.cols + (model.cols - 1)];
-    if (left) leftEdgePts.push(left);
-    if (right) rightEdgePts.push(right);
-  }
-  for (let col = 0; col < model.cols; col++) {
-    const top = model.projectedSurface[col];
-    const bottom =
-      model.projectedSurface[(model.rows - 1) * model.cols + col];
-    if (top) topEdgePts.push(top);
-    if (bottom) bottomEdgePts.push(bottom);
-  }
-  const leftEdgeStr = leftEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
-  const rightEdgeStr = rightEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
-  const topEdgeStr = topEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
-  const bottomEdgeStr = bottomEdgePts.map((p) => `${p.x},${p.y}`).join(" ");
   const titleProps = {
     x: titlePos.x + 125,
     y: titlePos.y + 130,
@@ -1430,6 +1852,18 @@ export default function PlateViz({
     },
     title,
   };
+  const activeAxisLabelLayout = isUsaDataset
+    ? { ...AXIS_LABEL_LAYOUT, side: "right" as const }
+    : AXIS_LABEL_LAYOUT;
+  const yearMax = model.frame.maxYear;
+  const yearMaxLine = model.yearLines.find((line) => line.year === yearMax);
+  const yearMaxPointsStr = yearMaxLine
+    ? yearMaxLine.points.map((p) => `${p.x},${p.y}`).join(" ")
+    : "";
+  const colMax = model.cols - 1;
+  const rightWallTopEdge2D = model.ages.map(
+    (_age, row) => model.projectedSurface[row * model.cols + colMax]
+  );
 
   return (
     <div
@@ -1441,20 +1875,13 @@ export default function PlateViz({
         boxSizing: "border-box",
       }}
     >
-      {showUI && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "0.75rem",
-            alignItems: "flex-end",
-            marginBottom: "0.75rem",
-          }}
-        >
+      {showUI && FEATURES.exportSvg && (
+        <div style={{ display: "inline-flex", gap: "0.5rem" }}>
           <button
             type="button"
             onClick={handleDownloadSvg}
             style={{
+              marginBottom: "0.75rem",
               padding: "0.4rem 0.8rem",
               fontFamily: "inherit",
               fontSize: "0.9rem",
@@ -1463,123 +1890,19 @@ export default function PlateViz({
           >
             Download SVG
           </button>
-          <label
+          <button
+            type="button"
+            onClick={handleDownloadTopViewSvg}
             style={{
-              display: "inline-flex",
-              flexDirection: "column",
-              gap: "0.25rem",
+              marginBottom: "0.75rem",
+              padding: "0.4rem 0.8rem",
+              fontFamily: "inherit",
+              fontSize: "0.9rem",
+              cursor: "pointer",
             }}
-            >
-              Render mode
-            <select
-              value={renderMode}
-              onChange={(e) =>
-                setRenderMode(e.target.value as RenderMode)
-              }
-            >
-              <option value="normal">Normal</option>
-              <option value="debugQuads">Debug: quad order</option>
-              <option value="debugTris">Debug: triangle order</option>
-            </select>
-          </label>
-          {renderMode === "debugTris" && (
-            <label
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                gap: "0.25rem",
-              }}
-            >
-              Triangle diagonal
-              <select
-                value={triDiagMode}
-                onChange={(e) =>
-                  setTriDiagMode(e.target.value as TriDiagMode)
-                }
-              >
-                <option value="autoBest">autoBest (least warp)</option>
-                <option value="fixedA">fixedA (p00→p11)</option>
-                <option value="fixedB">fixedB (p10→p01)</option>
-              </select>
-            </label>
-          )}
-          {renderMode === "debugTris" && (
-            <label
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                gap: "0.25rem",
-              }}
-            >
-              Reveal
-              <select
-                value={debugReveal}
-                onChange={(e) =>
-                  setDebugReveal(e.target.value as DebugReveal)
-                }
-              >
-                <option value="first">First N (back → front)</option>
-                <option value="last">Last N (front-most only)</option>
-              </select>
-            </label>
-          )}
-          {renderMode === "debugTris" && (
-            <>
-              <label
-                style={{
-                  display: "inline-flex",
-                  flexDirection: "column",
-                  gap: "0.25rem",
-                }}
-              >
-                Tri sort metric
-                <select
-                  value={triSortMetric}
-                  onChange={(e) =>
-                    setTriSortMetric(e.target.value as TriSortMetric)
-                  }
-                >
-                  <option value="maxY">maxY (near-most priority)</option>
-                  <option value="avgY">avgY (average depth)</option>
-                </select>
-              </label>
-              <label
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={triBackfaceCull}
-                  onChange={(e) => setTriBackfaceCull(e.target.checked)}
-                />
-                Backface cull
-              </label>
-            </>
-          )}
-          {(renderMode === "debugQuads" ||
-            renderMode === "debugTris") && (
-            <label
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                gap: "0.25rem",
-              }}
-            >
-              Quads drawn: {debugQuadCount}
-              <input
-                type="range"
-                min={0}
-                max={model.quads.length}
-                value={Math.min(debugQuadCount, model.quads.length)}
-                onChange={(e) =>
-                  setDebugQuadCount(Number(e.target.value))
-                }
-              />
-            </label>
-          )}
+          >
+            Download Top View SVG
+          </button>
         </div>
       )}
       <div
@@ -1598,277 +1921,173 @@ export default function PlateViz({
             background: vizStyle.svg.background,
             display: "block",
           }}
-          onMouseMove={renderMode === "normal" ? handleMouseMove : undefined}
-          onMouseLeave={renderMode === "normal" ? handleMouseLeave : undefined}
+          onMouseMove={FEATURES.hover ? handleMouseMove : undefined}
+          onMouseLeave={FEATURES.hover ? handleMouseLeave : undefined}
         >
           <g transform={`translate(${offsetX}, ${offsetY})`}>
-            {renderMode === "debugQuads" ? (
-              <g id="layer-debug-quads">
-                {model.quads
-                  .slice(
-                    0,
-                    Math.min(debugQuadCount, model.quads.length)
-                  )
-                  .map((quad, i) => (
-                    <polygon
-                      key={`dbg-quad-${i}`}
-                      points={quad.points2D
-                        .map((p) => `${p.x},${p.y}`)
-                        .join(" ")}
-                      fill="none"
-                      stroke="#000"
-                      strokeOpacity={0.35}
-                      strokeWidth={2}
-                    />
-                  ))}
+            {layersEnabled.architecture && (
+              <ArchitectureLayer
+                frame={model.frame}
+                projection={projection}
+                minYearExt={model.minYearExt}
+                maxYearExt={model.maxYearExt}
+                extendLeftYears={EXTEND_LEFT_YEARS}
+                extendRightYears={EXTEND_RIGHT_YEARS}
+                floorFrameString={floorFrameString}
+                floorAlpha={floorAlpha}
+                shadingInkColor={shadingConfig.inkColor}
+                backWallStyle={backWallStyle}
+                backwallFullLevels={valueLevelConfig.backwallFull}
+                backwallRightLevels={valueLevelConfig.backwallRightOnly}
+                floorStyle={floorStyle}
+                floorAgeStyle={floorAgeStyle}
+                rightWallStyle={rightWallStyle}
+                shadingConfig={shadingConfig}
+                surfacePoints={model.surfacePoints}
+                rows={model.rows}
+                cols={model.cols}
+                ages={model.ages}
+                maxSurvivors={model.maxSurvivors}
+                floorZ={FLOOR_DEPTH}
+                valueStep={activeRightWallValueStep}
+                valueMinorStep={activeRightWallMinorStep}
+                showRightWall={false}
+              />
+            )}
+            {layersEnabled.surface && (
+              <g id="surface-clipped">
+                <SurfaceLayer
+                  quads={model.quads}
+                  cells={model.cells}
+                  globalTriSort={globalTriSort}
+                  surfaceStyle={{
+                    fill: vizStyle.surface.fill,
+                    stroke: vizStyle.surface.stroke,
+                    strokeWidth: vizStyle.surface.strokeWidth,
+                  }}
+                  shading={shadingConfig}
+                  lightDir={lightDir}
+                  drawSegments={model.cells.length > 0}
+                  yearSegByCell={model.yearSegByQuad}
+                  yearStyle={vizStyle.years}
+                  ageSegByCell={model.ageSegByQuad}
+                  ageStyle={vizStyle.ages}
+                  valueSegByCell={model.valueSegByQuad}
+                  valueStyle={linesVizStyle.values}
+                  cohortSegByCell={model.cohortSegByQuad}
+                  cohortStyle={vizStyle.cohorts}
+                />
               </g>
-            ) : renderMode === "debugTris" ? (
-              <g id="layer-debug-tris">
-                {(() => {
-                  const total = model.quads.length;
-                  const n = Math.min(debugQuadCount, total);
-                  const slice =
-                    debugReveal === "first"
-                      ? model.quads.slice(0, n)
-                      : model.quads.slice(Math.max(0, total - n));
-                  const tris: {
-                    pts2: [Point2D, Point2D, Point2D];
-                    depthKey: number;
-                  }[] = [];
-                  for (const quad of slice) {
-                    const [p00, p10, p11, p01] = quad.corners3D;
-                    const [P00, P10, P11, P01] = quad.points2D;
-                    const nA1 = triNormal(p00, p10, p11);
-                    const nA2 = triNormal(p00, p11, p01);
-                    const scoreA = dot3(nA1, nA2);
-                    const nB1 = triNormal(p00, p10, p01);
-                    const nB2 = triNormal(p10, p11, p01);
-                    const scoreB = dot3(nB1, nB2);
-                    const useA =
-                      triDiagMode === "fixedA" ||
-                      (triDiagMode === "autoBest" &&
-                        scoreA >= scoreB);
-                    const candidates: [Point2D, Point2D, Point2D][] = useA
-                      ? [
-                          [P00, P10, P11],
-                          [P00, P11, P01],
-                        ]
-                      : [
-                          [P00, P10, P01],
-                          [P10, P11, P01],
-                        ];
-                    for (const t of candidates) {
-                      const [a, b, c] = t;
-                      if (triBackfaceCull) {
-                        const area = triArea2(a, b, c);
-                        if (area <= 0) continue;
-                      }
-                      const depthKey =
-                        triSortMetric === "maxY"
-                          ? Math.max(a.y, b.y, c.y)
-                          : (a.y + b.y + c.y) / 3;
-                      tris.push({ pts2: t, depthKey });
-                    }
-                  }
-                  tris.sort((u, v) => u.depthKey - v.depthKey);
-                  const trisTotal = tris.length;
-                  return tris.map((tri, triIndex) => {
-                    const t =
-                      trisTotal <= 1 ? 0 : triIndex / (trisTotal - 1);
-                    const gray = Math.round(245 - t * 160);
-                    const fill = `rgb(${gray},${gray},${gray})`;
-                    return (
-                      <polygon
-                        key={`dbg-tri-${triIndex}`}
-                        points={tri.pts2
-                          .map((p) => `${p.x},${p.y}`)
-                          .join(" ")}
-                        fill={fill}
-                        fillOpacity={0.95}
-                        stroke="#000"
-                        strokeOpacity={0.25}
-                        strokeWidth={DEBUG_TRI_STROKE_WIDTH}
-                      />
-                    );
-                  });
-                })()}
+            )}
+            {FEATURES.rightWall && (
+              <RightWall
+                surfacePoints={model.surfacePoints}
+                topEdge2D={rightWallTopEdge2D}
+                rows={model.rows}
+                cols={model.cols}
+                projection={projection}
+                floorZ={FLOOR_DEPTH}
+                ages={model.ages}
+                maxSurvivors={model.maxSurvivors}
+                valueStep={activeRightWallValueStep}
+                valueMinorStep={activeRightWallMinorStep}
+                frame={model.frame}
+                shading={shadingConfig}
+                style={rightWallStyle}
+              />
+            )}
+            {FEATURES.labels && layersEnabled.labels && (
+              <LabelsLayer
+                frame={model.frame}
+                projection={projection}
+                years={model.years}
+                minYearExt={model.minYearExt}
+                maxYearExt={model.maxYearExt}
+                axisLabelBaseStyle={AXIS_LABEL_STYLE}
+                axisLabelLayout={activeAxisLabelLayout}
+                vizStyle={{
+                  ages: { stroke: vizStyle.ages.stroke },
+                  values: { stroke: vizStyle.values.stroke },
+                  years: { stroke: vizStyle.years.stroke },
+                }}
+                valueLevels={{
+                  left: valueLevelConfig.left,
+                  right: valueLevelConfig.right,
+                }}
+                showTitle={showTitle}
+                valueLabelFormat={isUsaDataset ? "millions" : undefined}
+                age100Text={isUsaDataset ? "100 years old" : undefined}
+                titleProps={titleProps}
+                topValueByYear={topValueByYear}
+                yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
+              />
+            )}
+            {FEATURES.hover && layersEnabled.interaction && (
+              <InteractionLayer
+                hover={hover ? { x: hover.x, y: hover.y } : null}
+                accentColor={TOOLTIP_STYLE.accent}
+                radius={vizStyle.debugPoints.radius * 2}
+                strokeWidth={TOOLTIP_STYLE.borderWidth}
+              />
+            )}
+            {yearMaxLine && (
+              <polyline
+                points={yearMaxPointsStr}
+                fill="none"
+                stroke={vizStyle.years.stroke}
+                strokeWidth={vizStyle.years.thickWidth}
+                strokeOpacity={vizStyle.years.thickOpacity}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+            {DEBUG_CONTOUR_PROJ && debugContourOverlay && (
+              <g id="layer-debug-contours" pointerEvents="none">
+                {debugContourOverlay.rawRuns.map((run, runIndex) => (
+                  <polyline
+                    key={`debug-raw-${runIndex}`}
+                    points={run.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill="none"
+                    stroke="magenta"
+                    strokeWidth={1}
+                    strokeOpacity={0.8}
+                  />
+                ))}
+                {debugContourOverlay.directRuns.map((run, runIndex) => (
+                  <polyline
+                    key={`debug-direct-${runIndex}`}
+                    points={run.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill="none"
+                    stroke="cyan"
+                    strokeWidth={1}
+                    strokeOpacity={0.8}
+                  />
+                ))}
+                {debugContourOverlay.rawWallDots.map((p, i) => (
+                  <circle
+                    key={`debug-raw-dot-${i}`}
+                    cx={p.x}
+                    cy={p.y}
+                    r={1.6}
+                    fill="magenta"
+                    opacity={0.9}
+                  />
+                ))}
+                {debugContourOverlay.directWallDots.map((p, i) => (
+                  <circle
+                    key={`debug-direct-dot-${i}`}
+                    cx={p.x}
+                    cy={p.y}
+                    r={1.6}
+                    fill="cyan"
+                    opacity={0.9}
+                  />
+                ))}
               </g>
-            ) : (
-              <>
-                {layersEnabled.architecture && (
-                  <ArchitectureLayer
-                    frame={model.frame}
-                    projection={projection}
-                    minYearExt={model.minYearExt}
-                    maxYearExt={model.maxYearExt}
-                    extendLeftYears={EXTEND_LEFT_YEARS}
-                    extendRightYears={EXTEND_RIGHT_YEARS}
-                    floorFrameString={floorFrameString}
-                    floorAlpha={floorAlpha}
-                    shadingInkColor={shadingConfig.inkColor}
-                    backWallStyle={backWallStyle}
-                    backwallFullLevels={valueLevelConfig.backwallFull}
-                    backwallRightLevels={valueLevelConfig.backwallRightOnly}
-                    floorStyle={floorStyle}
-                    floorAgeStyle={floorAgeStyle}
-                    rightWallStyle={rightWallStyle}
-                    shadingConfig={shadingConfig}
-                    surfacePoints={model.surfacePoints}
-                    rows={model.rows}
-                    cols={model.cols}
-                    ages={model.ages}
-                    maxSurvivors={model.maxSurvivors}
-                    floorZ={FLOOR_DEPTH}
-                    valueStep={activeRightWallValueStep}
-                    valueMinorStep={activeRightWallMinorStep}
-                  />
-                )}
-                {layersEnabled.surface && (
-                  <>
-                    <SurfaceLayer
-                      quads={model.quads}
-                      triangles={model.triangles}
-                      surfaceStyle={{
-                        fill: vizStyle.surface.fill,
-                        stroke: vizStyle.surface.stroke,
-                        strokeWidth: vizStyle.surface.strokeWidth,
-                      }}
-                      shading={shadingConfig}
-                      lightDir={lightDir}
-                      drawSegments={false}
-                      yearSegByQuad={model.yearSegByQuad}
-                      yearStyle={vizStyle.years}
-                      ageSegByQuad={model.ageSegByQuad}
-                      ageStyle={vizStyle.ages}
-                      valueSegByQuad={model.valueSegByQuad}
-                      valueStyle={linesVizStyle.values}
-                      cohortSegByQuad={
-                        DEBUG_COHORT_ON_TOP
-                          ? undefined
-                          : model.cohortSegByQuad
-                      }
-                      cohortStyle={vizStyle.cohorts}
-                    />
-                    <g>
-                      <SurfaceLayer
-                        quads={model.quads}
-                        triangles={model.triangles}
-                        surfaceStyle={{
-                          fill: vizStyle.surface.fill,
-                          stroke: vizStyle.surface.stroke,
-                          strokeWidth: vizStyle.surface.strokeWidth,
-                        }}
-                        shading={shadingConfig}
-                        lightDir={lightDir}
-                        drawQuads={false}
-                        yearSegByQuad={model.yearSegByQuad}
-                        yearStyle={vizStyle.years}
-                        ageSegByQuad={model.ageSegByQuad}
-                        ageStyle={vizStyle.ages}
-                        valueSegByQuad={model.valueSegByQuad}
-                        valueStyle={linesVizStyle.values}
-                        cohortSegByQuad={model.cohortSegByQuad}
-                        cohortStyle={vizStyle.cohorts}
-                      />
-                    </g>
-                    <g id="surface-boundary">
-                      <polyline
-                        points={leftEdgeStr}
-                        fill="none"
-                        stroke={vizStyle.years.stroke}
-                        strokeWidth={vizStyle.years.thickWidth}
-                        strokeOpacity={vizStyle.years.thickOpacity}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <polyline
-                        points={rightEdgeStr}
-                        fill="none"
-                        stroke={vizStyle.years.stroke}
-                        strokeWidth={vizStyle.years.thickWidth}
-                        strokeOpacity={vizStyle.years.thickOpacity}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <polyline
-                        points={topEdgeStr}
-                        fill="none"
-                        stroke={vizStyle.ages.stroke}
-                        strokeWidth={vizStyle.ages.thickWidth}
-                        strokeOpacity={vizStyle.ages.thickOpacity}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                      <polyline
-                        points={bottomEdgeStr}
-                        fill="none"
-                        stroke={vizStyle.ages.stroke}
-                        strokeWidth={vizStyle.ages.thickWidth}
-                        strokeOpacity={vizStyle.ages.thickOpacity}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </g>
-                  </>
-                )}
-                {layersEnabled.lines && (
-                  <DataLinesLayer
-                    yearLines={model.yearLines}
-                    ageLines={model.ageLines}
-                    cohortLines={model.cohortLines}
-                    contourPolylines2D={model.contourPolylines2D}
-                    vizStyle={linesVizStyle}
-                    projectedSurface={model.projectedSurface}
-                    focus={hoverFocus}
-                    hoverOpacity={{
-                      highlightMult: HOVER_HIGHLIGHT_MULT,
-                      dimMult: HOVER_DIM_MULT,
-                    }}
-                    drawValues={false}
-                    drawAges={false}
-                    drawYears={false}
-                    showCohortLines={DEBUG_COHORT_ON_TOP}
-                    depthBuffer={depthBuffer}
-                    occlusion={OCCLUSION}
-                    surfacePoints={model.surfacePoints}
-                  />
-                )}
-                {layersEnabled.labels && (
-                  <LabelsLayer
-                    frame={model.frame}
-                    projection={projection}
-                    years={model.years}
-                    minYearExt={model.minYearExt}
-                    maxYearExt={model.maxYearExt}
-                    axisLabelBaseStyle={AXIS_LABEL_STYLE}
-                    axisLabelLayout={AXIS_LABEL_LAYOUT}
-                    vizStyle={{
-                      ages: { stroke: vizStyle.ages.stroke },
-                      values: { stroke: vizStyle.values.stroke },
-                      years: { stroke: vizStyle.years.stroke },
-                    }}
-                    valueLevels={{
-                      left: valueLevelConfig.left,
-                      right: valueLevelConfig.right,
-                    }}
-                    showTitle={showTitle}
-                    titleProps={titleProps}
-                    topValueByYear={topValueByYear}
-                  />
-                )}
-                {layersEnabled.interaction && (
-                  <InteractionLayer
-                    hover={hover ? { x: hover.x, y: hover.y } : null}
-                    accentColor={TOOLTIP_STYLE.accent}
-                    radius={vizStyle.debugPoints.radius * 2}
-                    strokeWidth={TOOLTIP_STYLE.borderWidth}
-                  />
-                )}
-              </>
             )}
           </g>
         </svg>
-        {renderMode === "normal" && hover && tooltipData && (
+        {FEATURES.hover && hover && tooltipData && (
           <div
             style={{
               position: "absolute",
@@ -1920,6 +2139,122 @@ export default function PlateViz({
             </div>
           </div>
         )}
+      </div>
+      <div
+        style={{
+          marginTop: 16,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+        }}
+      >
+        {(() => {
+          const topPad = 32;
+          const rightPad = 56;
+          const bottomPad = 48;
+          const leftPad = 32;
+          const plotHeight = Math.round(HEIGHT * 0.45);
+          const yPxPerAge =
+            plotHeight / (model.ages[model.ages.length - 1] - model.ages[0]);
+          const plotWidth = Math.round(
+            yPxPerAge * (model.years[model.years.length - 1] - model.years[0])
+          );
+          const topViewWidth = plotWidth + leftPad + rightPad;
+          const topViewHeight = plotHeight + topPad + bottomPad;
+          return (
+            <>
+              <TopView
+                width={topViewWidth}
+                height={topViewHeight}
+                svgRef={topViewSvgRef}
+                years={model.years}
+                ages={model.ages}
+                rows={swedenRows}
+                contours={contourRuns}
+                padding={{
+                  top: topPad,
+                  right: rightPad,
+                  bottom: bottomPad,
+                  left: leftPad,
+                }}
+                showYears={topShowYears}
+                showAges={topShowAges}
+                showCohorts={topShowCohorts}
+                showContours={topShowContours}
+                contourMode={topContourMode}
+                lineStyle={{
+                  years: vizStyle.years,
+                  ages: vizStyle.ages,
+                  cohorts: vizStyle.cohorts,
+                  values: linesVizStyle.values,
+                }}
+                axisLabelStyle={AXIS_LABEL_STYLE}
+                showTitle
+              />
+              <div
+                style={{
+                  marginTop: 8,
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
+                  fontSize: "0.85rem",
+                  alignItems: "center",
+                }}
+              >
+                <label
+                  style={{
+                    display: "inline-flex",
+                    flexDirection: "column",
+                    gap: "0.25rem",
+                  }}
+                >
+                  Contour mode
+                  <select
+                    value={topContourMode}
+                    onChange={(e) =>
+                      setTopContourMode(e.target.value as "raw" | "segmented")
+                    }
+                  >
+                    <option value="raw">raw</option>
+                    <option value="segmented">segmented</option>
+                  </select>
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowAges}
+                    onChange={(e) => setTopShowAges(e.target.checked)}
+                  />
+                  Age lines
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowYears}
+                    onChange={(e) => setTopShowYears(e.target.checked)}
+                  />
+                  Year lines
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowCohorts}
+                    onChange={(e) => setTopShowCohorts(e.target.checked)}
+                  />
+                  Cohort lines
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowContours}
+                    onChange={(e) => setTopShowContours(e.target.checked)}
+                  />
+                  Contour lines
+                </label>
+              </div>
+            </>
+          );
+        })()}
       </div>
     </div>
   );

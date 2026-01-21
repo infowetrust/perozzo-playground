@@ -30,6 +30,7 @@ type WallStyle = {
 
 type RightWallProps = {
   surfacePoints: Point3D[];
+  topEdge2D?: Point2D[];
   rows: number;
   cols: number;
   projection: ProjectionOptions;
@@ -61,6 +62,7 @@ type RightWallProps = {
 
 export default function RightWall({
   surfacePoints,
+  topEdge2D,
   rows,
   cols,
   projection,
@@ -113,23 +115,26 @@ export default function RightWall({
       : 0;
   const clipPathId = "rightWallClip";
 
-  const wallTop: Point2D[] = [];
-  const wallFloor: Point2D[] = [];
-  for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-    const topPoint3D = surfacePoints[rowIndex * cols + colMax];
-    if (!topPoint3D) continue;
-    wallTop.push(projectIso(topPoint3D, projection));
-    const floorPoint3D = {
-      x: topPoint3D.x,
-      y: topPoint3D.y,
-      z: floorZ,
-    };
-    wallFloor.push(projectIso(floorPoint3D, projection));
+  let wallTop: Point2D[] = topEdge2D ? [...topEdge2D] : [];
+  let wallFloor: Point2D[] = ages.map((age) =>
+    projectIso(frame.point(yearMax, age, floorZ), projection)
+  );
+  if (wallTop.length === 0) {
+    for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
+      const topPoint3D = surfacePoints[rowIndex * cols + colMax];
+      if (!topPoint3D) continue;
+      wallTop.push(projectIso(topPoint3D, projection));
+    }
   }
+  const n = Math.min(wallTop.length, wallFloor.length);
+  wallTop = wallTop.slice(0, n);
+  wallFloor = wallFloor.slice(0, n);
 
   const wallBottom = [...wallFloor].reverse();
   const polygonPoints = [...wallTop, ...wallBottom];
-  const polygonString = polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
+  const rightWallPolyString = polygonPoints
+    .map((p) => `${p.x},${p.y}`)
+    .join(" ");
 
   const ageBase = ages[0] ?? 0;
   const ageLines = wallTop.map((topPoint, rowIndex) => {
@@ -237,19 +242,19 @@ export default function RightWall({
     <>
       <defs>
         <clipPath id={clipPathId}>
-          <polygon points={polygonString} />
+          <polygon points={rightWallPolyString} />
         </clipPath>
       </defs>
 
       <polygon
-        points={polygonString}
+        points={rightWallPolyString}
         fill={style.surfaceFill}
         stroke={style.wallStroke}
         strokeWidth={style.surfaceStrokeWidth}
       />
       {wallAlpha > 0 && shadingConfig && (
         <polygon
-          points={polygonString}
+          points={rightWallPolyString}
           fill={shadingConfig.inkColor}
           fillOpacity={Math.min(1, wallAlpha)}
           stroke="none"
