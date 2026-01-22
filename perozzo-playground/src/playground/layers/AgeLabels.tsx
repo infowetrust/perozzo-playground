@@ -19,11 +19,11 @@ type AgeLabelsProps = {
 
 const LABEL_AGES = [0, 25, 50, 75, 100];
 const LABEL_TEXT: Record<number, string> = {
-  0: "Born",
+  0: "Newborns",
   25: "25",
   50: "50",
   75: "75",
-  100: "100",
+  100: "100+",
 };
 
 export default function AgeLabels({

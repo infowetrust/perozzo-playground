@@ -411,6 +411,7 @@ export default function SurfaceLayer({
       )}`;
     for (const [runKey, segs] of buckets.entries()) {
       const level = Number(runKey.split("-")[0]);
+      const runId = Number(runKey.split("-")[1]);
       const endpointMap = new Map<
         string,
         { segIndex: number; end: 0 | 1 }[]
@@ -428,6 +429,12 @@ export default function SurfaceLayer({
         endpointMap.set(key2, list2);
       });
       const visited = new Array(segs.length).fill(false);
+      let runMinDepth = Infinity;
+      let runMaxDepth = -Infinity;
+      for (const seg of segs) {
+        runMinDepth = Math.min(runMinDepth, seg.depthKey);
+        runMaxDepth = Math.max(runMaxDepth, seg.depthKey);
+      }
       const dist = (a: Point2D, b: Point2D) =>
         Math.hypot(a.x - b.x, a.y - b.y);
       const getPoint = (seg: SegmentRenderItem, end: 0 | 1) =>
@@ -443,6 +450,7 @@ export default function SurfaceLayer({
           { x: seg.x2, y: seg.y2 },
         ];
         let maxDepth = seg.depthKey;
+        let minDepth = seg.depthKey;
         const extend = (atStart: boolean) => {
           let extended = true;
           while (extended) {
@@ -474,6 +482,9 @@ export default function SurfaceLayer({
               if (segs[best.segIndex].depthKey > maxDepth) {
                 maxDepth = segs[best.segIndex].depthKey;
               }
+              if (segs[best.segIndex].depthKey < minDepth) {
+                minDepth = segs[best.segIndex].depthKey;
+              }
               if (atStart) {
                 chain.unshift(best.other);
               } else {
@@ -489,7 +500,10 @@ export default function SurfaceLayer({
           results.push({
             level,
             points: chain,
-            depthKey: maxDepth + 1e-6,
+            depthKey:
+              level === 20_000_000 && runId === 29
+                ? minDepth - 1e-6
+                : maxDepth + 1e-6,
           });
         }
       }
@@ -558,6 +572,9 @@ export default function SurfaceLayer({
             const segItems = buildSegmentItemsForCell(cell.cellKey, segDepth);
             for (const seg of segItems) {
               if (seg.isContour) {
+                if (seg.level === 20_000_000 && seg.runId === 30) {
+                  continue;
+                }
                 contourSegs.push(seg);
               } else {
                 renderItems.push({ kind: "seg", ...seg });
@@ -584,58 +601,97 @@ export default function SurfaceLayer({
           <g id="layer-surface-global">
             {renderItems.map((item) =>
               item.kind === "tri" ? (
-                <polygon
+                <g key={item.key}>
+                  <polygon
+                    points={item.pts2.map((p) => `${p.x},${p.y}`).join(" ")}
+                    fill={
+                      debugTriVis
+                        ? debugTriFill(item.triIndex)
+                        : surfaceStyle.fill
+                    }
+                    stroke={debugTriVis ? debugTriStroke : surfaceStyle.stroke}
+                    strokeWidth={
+                      debugTriVis
+                        ? debugTriStrokeWidth
+                        : surfaceStyle.strokeWidth
+                    }
+                  />
+                  {shading.enabled && !debugTriVis && (() => {
+                    let normal = quadNormal(
+                      item.pts3[0],
+                      item.pts3[1],
+                      item.pts3[2]
+                    );
+                    if (normal.z < 0) {
+                      normal = { x: -normal.x, y: -normal.y, z: -normal.z };
+                    }
+                    const brightness = lambert(
+                      normal,
+                      lightDir,
+                      shading.ambient,
+                      shading.diffuse
+                    );
+                    const alpha = inkAlphaFromBrightness({
+                      brightness,
+                      ambient: shading.ambient,
+                      diffuse: shading.diffuse,
+                      steps: shading.steps,
+                      inkAlphaMax: shading.inkAlphaMax,
+                      gamma: shading.gamma,
+                      shadowBias: shading.shadowBias,
+                      alphaScale: shading.alphaScale.surface,
+                    });
+                    if (alpha <= 0) return null;
+                    return (
+                      <polygon
+                        points={item.pts2
+                          .map((p) => `${p.x},${p.y}`)
+                          .join(" ")}
+                        fill={shading.inkColor}
+                        fillOpacity={Math.min(
+                          1,
+                          alpha * shading.alphaScale.surface
+                        )}
+                        stroke="none"
+                      />
+                    );
+                  })()}
+                </g>
+              ) : item.kind === "contour" ? (
+                <polyline
                   key={item.key}
-                  points={item.pts2.map((p) => `${p.x},${p.y}`).join(" ")}
-                  fill={
-                    debugTriVis
-                      ? debugTriFill(item.triIndex)
-                      : surfaceStyle.fill
-                  }
-                  stroke={debugTriVis ? debugTriStroke : surfaceStyle.stroke}
+                  points={item.points.map((p) => `${p.x},${p.y}`).join(" ")}
+                  fill="none"
+                  stroke={valueStyle?.stroke ?? "#5c8f6a"}
                   strokeWidth={
-                    debugTriVis
-                      ? debugTriStrokeWidth
-                      : surfaceStyle.strokeWidth
+                    valueStyle
+                      ? isHeavy(item.level, valueStyle.heavyStep)
+                        ? valueStyle.thickWidth
+                        : valueStyle.thinWidth
+                      : 1
                   }
+                  strokeOpacity={
+                    valueStyle
+                      ? isHeavy(item.level, valueStyle.heavyStep)
+                        ? valueStyle.thickOpacity
+                        : valueStyle.thinOpacity
+                      : 1
+                  }
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
               ) : (
-                item.kind === "contour" ? (
-                  <polyline
-                    key={item.key}
-                    points={item.points.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill="none"
-                    stroke={valueStyle?.stroke ?? "#5c8f6a"}
-                    strokeWidth={
-                      valueStyle
-                        ? isHeavy(item.level, valueStyle.heavyStep)
-                          ? valueStyle.thickWidth
-                          : valueStyle.thinWidth
-                        : 1
-                    }
-                    strokeOpacity={
-                      valueStyle
-                        ? isHeavy(item.level, valueStyle.heavyStep)
-                          ? valueStyle.thickOpacity
-                          : valueStyle.thinOpacity
-                        : 1
-                    }
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                ) : (
-                  <line
-                    key={item.key}
-                    x1={item.x1}
-                    y1={item.y1}
-                    x2={item.x2}
-                    y2={item.y2}
-                    stroke={item.stroke}
-                    strokeWidth={item.strokeWidth}
-                    strokeOpacity={item.strokeOpacity}
-                    strokeLinecap="round"
-                  />
-                )
+                <line
+                  key={item.key}
+                  x1={item.x1}
+                  y1={item.y1}
+                  x2={item.x2}
+                  y2={item.y2}
+                  stroke={item.stroke}
+                  strokeWidth={item.strokeWidth}
+                  strokeOpacity={item.strokeOpacity}
+                  strokeLinecap="round"
+                />
               )
             )}
             {debugTriVis &&
@@ -664,19 +720,60 @@ export default function SurfaceLayer({
             return (
               <g key={`cell-${cell.cellKey}`}>
                 {cell.tris.map((tri, triIndex) => (
-                  <polygon
-                    key={`tri-${cell.cellKey}-${triIndex}`}
-                    points={tri.pts2.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill={
-                      debugTriVis ? debugTriFill(triIndex) : surfaceStyle.fill
-                    }
-                    stroke={debugTriVis ? debugTriStroke : surfaceStyle.stroke}
-                    strokeWidth={
-                      debugTriVis
-                        ? debugTriStrokeWidth
-                        : surfaceStyle.strokeWidth
-                    }
-                  />
+                  <g key={`tri-${cell.cellKey}-${triIndex}`}>
+                    <polygon
+                      points={tri.pts2.map((p) => `${p.x},${p.y}`).join(" ")}
+                      fill={
+                        debugTriVis ? debugTriFill(triIndex) : surfaceStyle.fill
+                      }
+                      stroke={debugTriVis ? debugTriStroke : surfaceStyle.stroke}
+                      strokeWidth={
+                        debugTriVis
+                          ? debugTriStrokeWidth
+                          : surfaceStyle.strokeWidth
+                      }
+                    />
+                    {shading.enabled && !debugTriVis && (() => {
+                      let normal = quadNormal(
+                        tri.pts3[0],
+                        tri.pts3[1],
+                        tri.pts3[2]
+                      );
+                      if (normal.z < 0) {
+                        normal = { x: -normal.x, y: -normal.y, z: -normal.z };
+                      }
+                      const brightness = lambert(
+                        normal,
+                        lightDir,
+                        shading.ambient,
+                        shading.diffuse
+                      );
+                      const alpha = inkAlphaFromBrightness({
+                        brightness,
+                        ambient: shading.ambient,
+                        diffuse: shading.diffuse,
+                        steps: shading.steps,
+                        inkAlphaMax: shading.inkAlphaMax,
+                        gamma: shading.gamma,
+                        shadowBias: shading.shadowBias,
+                        alphaScale: shading.alphaScale.surface,
+                      });
+                      if (alpha <= 0) return null;
+                      return (
+                        <polygon
+                          points={tri.pts2
+                            .map((p) => `${p.x},${p.y}`)
+                            .join(" ")}
+                          fill={shading.inkColor}
+                          fillOpacity={Math.min(
+                            1,
+                            alpha * shading.alphaScale.surface
+                          )}
+                          stroke="none"
+                        />
+                      );
+                    })()}
+                  </g>
                 ))}
                 {debugTriVis && cell.split4 && cell.splitCenter && (
                   <circle

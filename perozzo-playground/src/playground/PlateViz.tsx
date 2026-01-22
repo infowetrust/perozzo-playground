@@ -37,6 +37,7 @@ import { segmentizeContourPolyline } from "./contourSegmenter";
 type ContourPointFile = { year: number; age: number };
 type ContourFile = {
   level: number;
+  runId?: number;
   points?: ContourPointFile[];
   runs?: ContourPointFile[][];
 };
@@ -203,19 +204,42 @@ const vizStyle = {
   // Example: {x:-1, y:-0.3, z:0.6} = a slightly overhead light coming from upper-left/front.
   shading: {
     enabled: true,
-    ambient: 0.35,
-    diffuse: 0.65,
-    steps: 5,
-    lightDir: { x: -1.0, y: -0.3, z: 0.4 },
+
+    // ambient: baseline brightness applied everywhere (independent of light angle).
+    // Higher = flatter/less contrast; lower = deeper shadows and more relief.
+    ambient: 0.5,      // Sweden was 0.35
+
+    // diffuse: angle‑dependent brightness from the light direction.
+    // Higher = stronger highlight/shadow contrast; lower = softer shading.
+    diffuse: .2,      // Sweden was 0.65
+
+    steps: 7,           // Sweden was 5
+
+    // lightDir is in model space (x=year axis, y=age/depth axis, z=value/height).
+    // Negative x = light from the left; positive x = from the right.
+    // Negative y = light from the front (toward viewer); positive y = from the back.
+    // Higher z = more overhead; lower z = more grazing (stronger ridge relief).
+
+    lightDir: { x: -.5, y: 0.5, z: 0.35 }, // Sweden was x: -1.0, y: -0.3, z: 0.4 
     inkColor: "#b3a191ff",
-    inkAlphaMax: 0.25,
-    gamma: .4,
-    shadowBias: 0.6,
+
+    // inkAlphaMax: upper cap on the shadow-ink overlay opacity.
+    // Higher = darker/more contrasty shading; lower = lighter, subtler relief.
+    inkAlphaMax: 0.45,  // Sweden was 0.25
+
+    // gamma: perceptual curve for brightness → ink mapping.
+    // Higher = compresses highlights and emphasizes mid/shadows; lower = flatter, more linear shading.
+    gamma: 0.6,         // Sweden was 0.4
+
+    // shadowBias: shifts the brightness threshold before ink appears.
+    // Higher = fewer areas receive shadow ink (cleaner, flatter); lower = more area gets ink (stronger shading).
+    shadowBias: 0.45,   // Sweden was 0.6
+
     // higher alpha scale is darker
     alphaScale: {
-      surface: 1,
+      surface: 1,     // Sweden was 1
       backWall: .5,
-      rightWall: 0.5,
+      rightWall: 0.2, // Sweden was 0.5
       floor: 0,
     },
   },
@@ -285,6 +309,7 @@ type CohortLine = {
 };
 type ValueContour2D = {
   level: number;
+  runId?: number;
   points: Point2D[];
   data: { year: number; age: number }[];
 };
@@ -742,6 +767,7 @@ function buildValueContours2D(
     if (pts.length < 2) return null;
     return {
       level: iso.level,
+      runId: iso.runId,
       points: pts,
       data: dataPts,
     };
@@ -786,15 +812,18 @@ function runAreaYearAge(points: ContourPointFile[]): number {
 
 function flattenContourRuns(contours: ContourFile[]): ContourFile[] {
   const out: ContourFile[] = [];
+  let runId = 0;
   for (const iso of contours) {
     if (iso.runs && iso.runs.length > 0) {
       for (const run of iso.runs) {
-        out.push({ level: iso.level, points: run });
+        out.push({ level: iso.level, points: run, runId });
+        runId += 1;
       }
       continue;
     }
     if (iso.points && iso.points.length > 0) {
-      out.push({ level: iso.level, points: iso.points });
+      out.push({ level: iso.level, points: iso.points, runId });
+      runId += 1;
     }
   }
   return out;
@@ -918,6 +947,8 @@ export default function PlateViz({
   const [topShowAges, setTopShowAges] = useState<boolean>(true);
   const [topShowCohorts, setTopShowCohorts] = useState<boolean>(true);
   const [topShowContours, setTopShowContours] = useState<boolean>(true);
+  const [topShowContourCrossings, setTopShowContourCrossings] =
+    useState<boolean>(false);
   const [topContourMode, setTopContourMode] =
     useState<"raw" | "segmented">("raw");
   const topViewSvgRef = useRef<SVGSVGElement | null>(null);
@@ -970,6 +1001,20 @@ export default function PlateViz({
   const contourRuns = useMemo(
     () => flattenContourRuns(contourData),
     [contourData]
+  );
+  const topViewContourRuns = useMemo(
+    () =>
+      contourRuns
+        .filter(
+          (run): run is { level: number; points: YearAgePoint[]; runId?: number } =>
+            !!run.points && run.points.length > 0
+        )
+        .map((run) => ({
+          level: run.level,
+          points: run.points,
+          runId: run.runId,
+        })),
+    [contourRuns]
   );
   const stereoContourRuns = useMemo(() => {
     const targetLevel = 12_000_000;
@@ -1471,7 +1516,7 @@ export default function PlateViz({
         iso.data,
         years,
         ages,
-        isoIndex,
+        iso.runId ?? isoIndex,
         { splitByAgeLines: false }
       );
       for (const seg of segments) {
@@ -1574,6 +1619,17 @@ export default function PlateViz({
       },
     };
   }, [model.contourPolylines2D, model.frame, projection, stereoContourRuns]);
+
+  const frontWall = useMemo(() => {
+    const frontAge = model.ages[model.ages.length - 1];
+    const topLine = model.ageLines.find((line) => line.age === frontAge);
+    if (!topLine || topLine.points.length < 2) return null;
+    const bottomPoints = model.years.map((year) =>
+      projectIso(model.frame.point(year, frontAge, 0), projection)
+    );
+    const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
+    return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
+  }, [model.ageLines, model.ages, model.frame, model.years, projection]);
   if (DEBUG_CONTOUR_PROJ && debugContourOverlay && !contourDebugLogged) {
     contourDebugLogged = true;
     // eslint-disable-next-line no-console
@@ -1955,29 +2011,39 @@ export default function PlateViz({
               />
             )}
             {layersEnabled.surface && (
-              <g id="surface-clipped">
-                <SurfaceLayer
-                  quads={model.quads}
-                  cells={model.cells}
-                  globalTriSort={globalTriSort}
-                  surfaceStyle={{
-                    fill: vizStyle.surface.fill,
-                    stroke: vizStyle.surface.stroke,
-                    strokeWidth: vizStyle.surface.strokeWidth,
-                  }}
-                  shading={shadingConfig}
-                  lightDir={lightDir}
-                  drawSegments={model.cells.length > 0}
-                  yearSegByCell={model.yearSegByQuad}
-                  yearStyle={vizStyle.years}
-                  ageSegByCell={model.ageSegByQuad}
-                  ageStyle={vizStyle.ages}
-                  valueSegByCell={model.valueSegByQuad}
-                  valueStyle={linesVizStyle.values}
-                  cohortSegByCell={model.cohortSegByQuad}
-                  cohortStyle={vizStyle.cohorts}
-                />
-              </g>
+              <>
+                {frontWall && (
+                  <polygon
+                    points={frontWall}
+                    fill={"#b3a19155"}//{rightWallStyle.wallFill ?? vizStyle.wall.fill}
+                    stroke="none"
+                    id="layer-front-wall"
+                  />
+                )}
+                <g id="surface-clipped">
+                  <SurfaceLayer
+                    quads={model.quads}
+                    cells={model.cells}
+                    globalTriSort={globalTriSort}
+                    surfaceStyle={{
+                      fill: vizStyle.surface.fill,
+                      stroke: vizStyle.surface.stroke,
+                      strokeWidth: vizStyle.surface.strokeWidth,
+                    }}
+                    shading={shadingConfig}
+                    lightDir={lightDir}
+                    drawSegments={model.cells.length > 0}
+                    yearSegByCell={model.yearSegByQuad}
+                    yearStyle={vizStyle.years}
+                    ageSegByCell={model.ageSegByQuad}
+                    ageStyle={vizStyle.ages}
+                    valueSegByCell={model.valueSegByQuad}
+                    valueStyle={linesVizStyle.values}
+                    cohortSegByCell={model.cohortSegByQuad}
+                    cohortStyle={vizStyle.cohorts}
+                  />
+                </g>
+              </>
             )}
             {FEATURES.rightWall && (
               <RightWall
@@ -2016,7 +2082,7 @@ export default function PlateViz({
                 }}
                 showTitle={showTitle}
                 valueLabelFormat={isUsaDataset ? "millions" : undefined}
-                age100Text={isUsaDataset ? "100 years old" : undefined}
+                age100Text={isUsaDataset ? "100+ years old" : undefined}
                 titleProps={titleProps}
                 topValueByYear={topValueByYear}
                 yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
@@ -2149,10 +2215,10 @@ export default function PlateViz({
         }}
       >
         {(() => {
-          const topPad = 32;
-          const rightPad = 56;
-          const bottomPad = 48;
-          const leftPad = 32;
+          const topPad = 44;
+          const rightPad = 140;
+          const bottomPad = 68;
+          const leftPad = 52;
           const plotHeight = Math.round(HEIGHT * 0.45);
           const yPxPerAge =
             plotHeight / (model.ages[model.ages.length - 1] - model.ages[0]);
@@ -2170,7 +2236,7 @@ export default function PlateViz({
                 years={model.years}
                 ages={model.ages}
                 rows={swedenRows}
-                contours={contourRuns}
+                contours={topViewContourRuns}
                 padding={{
                   top: topPad,
                   right: rightPad,
@@ -2181,6 +2247,7 @@ export default function PlateViz({
                 showAges={topShowAges}
                 showCohorts={topShowCohorts}
                 showContours={topShowContours}
+                showContourCrossings={topShowContourCrossings}
                 contourMode={topContourMode}
                 lineStyle={{
                   years: vizStyle.years,
@@ -2250,6 +2317,16 @@ export default function PlateViz({
                     onChange={(e) => setTopShowContours(e.target.checked)}
                   />
                   Contour lines
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowContourCrossings}
+                    onChange={(e) =>
+                      setTopShowContourCrossings(e.target.checked)
+                    }
+                  />
+                  Contour crossings
                 </label>
               </div>
             </>

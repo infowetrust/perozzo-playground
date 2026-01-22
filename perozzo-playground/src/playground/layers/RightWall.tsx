@@ -151,6 +151,9 @@ export default function RightWall({
       heavy,
     };
   });
+  const insetPoint = (p: Point2D): Point2D => p;
+  const ageBaseLine = ageLines[0];
+  const ageLinesInner = ageLines.slice(1);
 
   const edgeStart3D = surfacePoints[0 * cols + colMax];
   const edgeEnd3D = surfacePoints[(rows - 1) * cols + colMax];
@@ -237,6 +240,8 @@ export default function RightWall({
       });
     }
   }
+  const valueZeroLine = valueLines.find((line) => line.key === "val-0");
+  const valueLinesInner = valueLines.filter((line) => line.key !== "val-0");
 
   return (
     <>
@@ -262,7 +267,7 @@ export default function RightWall({
       )}
 
       <g clipPath={`url(#${clipPathId})`}>
-        {ageLines.map((line) => (
+        {ageLinesInner.map((line) => (
           <line
             key={line.key}
             x1={line.top.x}
@@ -278,7 +283,7 @@ export default function RightWall({
           />
         ))}
 
-        {valueLines.map((line) => (
+        {valueLinesInner.map((line) => (
           <line
             key={line.key}
             x1={line.start.x}
@@ -294,6 +299,42 @@ export default function RightWall({
           />
         ))}
       </g>
+      {ageBaseLine && (
+        <line
+          x1={insetPoint(ageBaseLine.top).x}
+          y1={insetPoint(ageBaseLine.top).y}
+          x2={insetPoint(ageBaseLine.bottom).x}
+          y2={insetPoint(ageBaseLine.bottom).y}
+          stroke={style.ageStroke}
+          strokeWidth={
+            ageBaseLine.heavy ? style.ageThick : style.ageThin
+          }
+          strokeOpacity={
+            ageBaseLine.heavy
+              ? style.ageThickOpacity
+              : style.ageThinOpacity
+          }
+          strokeLinecap="round"
+        />
+      )}
+      {valueZeroLine && (
+        <line
+          x1={insetPoint(valueZeroLine.start).x}
+          y1={insetPoint(valueZeroLine.start).y}
+          x2={insetPoint(valueZeroLine.end).x}
+          y2={insetPoint(valueZeroLine.end).y}
+          stroke={style.valueStroke}
+          strokeWidth={
+            valueZeroLine.heavy ? style.valueThick : style.valueThin
+          }
+          strokeOpacity={
+            valueZeroLine.heavy
+              ? style.valueThickOpacity
+              : style.valueThinOpacity
+          }
+          strokeLinecap="square"
+        />
+      )}
     </>
   );
 }

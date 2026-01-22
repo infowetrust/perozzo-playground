@@ -68,7 +68,7 @@ const DATASETS: Record<string, DatasetConfig> = {
     rightWallValueStep: 5_000_000,
     rightWallMinorStep: 1_000_000,
     maxHeight: 2.6,
-    projectionTweaks: { ageScaleMultiplier: 1.2, ageAxisAngleDeg: 140 },
+    projectionTweaks: { ageScaleMultiplier: 1.1, ageAxisAngleDeg: 140 },
     showTitle: false,
   },
 };
