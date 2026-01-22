@@ -3,7 +3,7 @@
  * Picks parameters, calls core functions, draws marks.
  * Keeps React focused on layout, not math.
  */
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   floorPolygon,
@@ -46,6 +46,7 @@ type TidyRow = ReturnType<typeof parseSwedenCsv>[number];
 type PlateVizProps = {
   csvText: string;
   contours: ContourFile[] | any;
+  isotonicCsvText?: string;
   preset?: ProjectionPreset;
   showUI?: boolean;
   canvas?: { width: number; height: number };
@@ -352,10 +353,18 @@ type ValueSegment = {
   y2: number;
   level: number;
 };
+type IsotonicSegment = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  quantile: 25 | 50 | 75;
+};
 
 type Vec3 = { x: number; y: number; z: number };
 let triCellHistLogged = false;
 let split4CountLogged = false;
+let isotonicDebugLogged = false;
 
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
 
@@ -916,6 +925,7 @@ function computeAutoCenterOffset(
 export default function PlateViz({
   csvText,
   contours,
+  isotonicCsvText,
   preset: presetProp = "levasseur",
   showUI = true,
   canvas,
@@ -949,6 +959,7 @@ export default function PlateViz({
   const [topShowContours, setTopShowContours] = useState<boolean>(true);
   const [topShowContourCrossings, setTopShowContourCrossings] =
     useState<boolean>(false);
+  const [topShowIsotonic, setTopShowIsotonic] = useState<boolean>(true);
   const [topContourMode, setTopContourMode] =
     useState<"raw" | "segmented">("raw");
   const topViewSvgRef = useRef<SVGSVGElement | null>(null);
@@ -994,6 +1005,69 @@ export default function PlateViz({
     }
     return parsed;
   }, [csvText, isUsaDataset]);
+  const isotonicRows = useMemo(() => {
+    if (!isotonicCsvText) return [];
+    const text = isotonicCsvText.trim();
+    if (!text) return [];
+    const lines = text.split(/\r?\n/);
+    const header = lines.shift();
+    if (!header) return [];
+    const rows: {
+      year: number;
+      total: number;
+      q25_age: number;
+      q50_age: number;
+      q75_age: number;
+      q25_pop: number;
+      q50_pop: number;
+      q75_pop: number;
+    }[] = [];
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const [
+        yearStr,
+        totalStr,
+        q25AgeStr,
+        q50AgeStr,
+        q75AgeStr,
+        q25PopStr,
+        q50PopStr,
+        q75PopStr,
+      ] = line.split(",");
+      const year = Number(yearStr);
+      const total = Number(totalStr);
+      const q25_age = Number(q25AgeStr);
+      const q50_age = Number(q50AgeStr);
+      const q75_age = Number(q75AgeStr);
+      const q25_pop = Number(q25PopStr);
+      const q50_pop = Number(q50PopStr);
+      const q75_pop = Number(q75PopStr);
+      if (
+        !Number.isFinite(year) ||
+        !Number.isFinite(total) ||
+        !Number.isFinite(q25_age) ||
+        !Number.isFinite(q50_age) ||
+        !Number.isFinite(q75_age) ||
+        !Number.isFinite(q25_pop) ||
+        !Number.isFinite(q50_pop) ||
+        !Number.isFinite(q75_pop)
+      ) {
+        continue;
+      }
+      rows.push({
+        year,
+        total,
+        q25_age,
+        q50_age,
+        q75_age,
+        q25_pop,
+        q50_pop,
+        q75_pop,
+      });
+    }
+    rows.sort((a, b) => a.year - b.year);
+    return rows;
+  }, [isotonicCsvText]);
   const contourData = useMemo(
     () => contours as ContourFile[],
     [contours]
@@ -1006,8 +1080,13 @@ export default function PlateViz({
     () =>
       contourRuns
         .filter(
-          (run): run is { level: number; points: YearAgePoint[]; runId?: number } =>
-            !!run.points && run.points.length > 0
+          (
+            run
+          ): run is {
+            level: number;
+            points: { year: number; age: number | null }[];
+            runId?: number;
+          } => !!run.points && run.points.length > 0
         )
         .map((run) => ({
           level: run.level,
@@ -1530,6 +1609,88 @@ export default function PlateViz({
         }
       }
     });
+    const isotonicSegByQuad = new Map<string, IsotonicSegment[]>();
+    if (isotonicRows.length > 0) {
+      const survivorsByYear = new Map<number, Map<number, number>>();
+      for (const row of swedenRows) {
+        const bucket = survivorsByYear.get(row.year);
+        if (bucket) {
+          bucket.set(row.age, row.survivors);
+        } else {
+          survivorsByYear.set(row.year, new Map([[row.age, row.survivors]]));
+        }
+      }
+      const agesSorted = [...ages].sort((a, b) => a - b);
+      const interpSurvivors = (year: number, age: number): number | null => {
+        const yearMap = survivorsByYear.get(year);
+        if (!yearMap) return null;
+        if (yearMap.has(age)) return yearMap.get(age) ?? null;
+        let idx = agesSorted.findIndex((a) => a > age);
+        if (idx <= 0) return yearMap.get(agesSorted[0]) ?? null;
+        if (idx < 0) idx = agesSorted.length;
+        if (idx >= agesSorted.length) {
+          return yearMap.get(agesSorted[agesSorted.length - 1]) ?? null;
+        }
+        const a0 = agesSorted[idx - 1];
+        const a1 = agesSorted[idx];
+        const v0 = yearMap.get(a0);
+        const v1 = yearMap.get(a1);
+        if (v0 == null || v1 == null) return null;
+        const t = (age - a0) / (a1 - a0);
+        return v0 + (v1 - v0) * t;
+      };
+      const quantiles: (25 | 50 | 75)[] = [25, 50, 75];
+      for (const q of quantiles) {
+        const data = isotonicRows
+          .map((row) => ({
+            year: row.year,
+            age: q === 25 ? row.q25_age : q === 50 ? row.q50_age : row.q75_age,
+            pop:
+              interpSurvivors(
+                row.year,
+                q === 25
+                  ? row.q25_age
+                  : q === 50
+                    ? row.q50_age
+                    : row.q75_age
+              ) ?? 0,
+          }))
+          .filter(
+            (row) =>
+              Number.isFinite(row.year) &&
+              Number.isFinite(row.age) &&
+              Number.isFinite(row.pop)
+          );
+        if (data.length < 2) continue;
+        const points = data.map((row) =>
+          projectIso(frame.point(row.year, row.age, row.pop), projection)
+        );
+        const segments = segmentizeContourPolyline(
+          q,
+          points,
+          data.map((row) => ({ year: row.year, age: row.age })),
+          years,
+          ages,
+          q
+        );
+        for (const seg of segments) {
+          const { cellKey } = seg;
+          const bucket = isotonicSegByQuad.get(cellKey);
+          const isoSeg: IsotonicSegment = {
+            x1: seg.x1,
+            y1: seg.y1,
+            x2: seg.x2,
+            y2: seg.y2,
+            quantile: q,
+          };
+          if (bucket) {
+            bucket.push(isoSeg);
+          } else {
+            isotonicSegByQuad.set(cellKey, [isoSeg]);
+          }
+        }
+      }
+    }
     return {
       surfacePoints,
       rows,
@@ -1554,10 +1715,55 @@ export default function PlateViz({
       ageSegByQuad,
       cohortSegByQuad,
       valueSegByQuad,
+      isotonicSegByQuad,
       contourPolylines2D,
       maxZ,
     };
-  }, [projection, swedenRows, stereoContourRuns]);
+  }, [projection, swedenRows, stereoContourRuns, isotonicRows]);
+  useEffect(() => {
+    if (isotonicDebugLogged) return;
+    if (!isUsaDataset || isotonicRows.length === 0) return;
+    isotonicDebugLogged = true;
+    const sampleYears = [1900, 1950, 2000, 2025];
+    const ages = model?.ages ?? [];
+    const years = model?.years ?? [];
+    const rows = isotonicRows.filter((row) =>
+      sampleYears.includes(row.year)
+    );
+    const findSurfaceZ = (year: number, age: number) => {
+      if (!years.length || !ages.length) return null;
+      const col = years.indexOf(year);
+      if (col < 0) return null;
+      let row = ages.findIndex((a) => a >= age);
+      if (row < 0) row = ages.length - 1;
+      row = Math.min(Math.max(row, 0), ages.length - 1);
+      const idx = row * years.length + col;
+      const p = model?.surfacePoints?.[idx];
+      return p ? p.z : null;
+    };
+    const format = (v: number | null) =>
+      v == null || !Number.isFinite(v) ? "n/a" : v.toFixed(3);
+    const out = rows.map((row) => ({
+      year: row.year,
+      q25: {
+        age: row.q25_age,
+        pop: row.q25_pop,
+        surfaceZ: format(findSurfaceZ(row.year, row.q25_age)),
+      },
+      q50: {
+        age: row.q50_age,
+        pop: row.q50_pop,
+        surfaceZ: format(findSurfaceZ(row.year, row.q50_age)),
+      },
+      q75: {
+        age: row.q75_age,
+        pop: row.q75_pop,
+        surfaceZ: format(findSurfaceZ(row.year, row.q75_age)),
+      },
+    }));
+    // eslint-disable-next-line no-console
+    console.log("[ISOTONIC DEBUG]", out);
+  }, [isUsaDataset, isotonicRows, model]);
   const debugContourOverlay = useMemo(() => {
     if (!DEBUG_CONTOUR_PROJ) return null;
     const level = DEBUG_CONTOUR_LEVEL;
@@ -1894,6 +2100,13 @@ export default function PlateViz({
     },
     debugPoints: vizStyle.debugPoints,
   };
+  const isotonicStyle = {
+    stroke: TOOLTIP_STYLE.accent,
+    thinWidth: vizStyle.years.thickWidth,
+    thickWidth: vizStyle.years.thickWidth,
+    thinOpacity: 1,
+    thickOpacity: 1,
+  };
   const titleProps = {
     x: titlePos.x + 125,
     y: titlePos.y + 130,
@@ -2041,6 +2254,8 @@ export default function PlateViz({
                     valueStyle={linesVizStyle.values}
                     cohortSegByCell={model.cohortSegByQuad}
                     cohortStyle={vizStyle.cohorts}
+                    isotonicSegByCell={model.isotonicSegByQuad}
+                    isotonicStyle={isotonicStyle}
                   />
                 </g>
               </>
@@ -2237,6 +2452,12 @@ export default function PlateViz({
                 ages={model.ages}
                 rows={swedenRows}
                 contours={topViewContourRuns}
+                isotonicRows={isotonicRows}
+                isotonicStyle={{
+                  stroke: isotonicStyle.stroke,
+                  width: isotonicStyle.thickWidth,
+                  opacity: isotonicStyle.thickOpacity,
+                }}
                 padding={{
                   top: topPad,
                   right: rightPad,
@@ -2248,6 +2469,7 @@ export default function PlateViz({
                 showCohorts={topShowCohorts}
                 showContours={topShowContours}
                 showContourCrossings={topShowContourCrossings}
+                showIsotonic={topShowIsotonic}
                 contourMode={topContourMode}
                 lineStyle={{
                   years: vizStyle.years,
@@ -2317,6 +2539,14 @@ export default function PlateViz({
                     onChange={(e) => setTopShowContours(e.target.checked)}
                   />
                   Contour lines
+                </label>
+                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={topShowIsotonic}
+                    onChange={(e) => setTopShowIsotonic(e.target.checked)}
+                  />
+                  Isotonic lines
                 </label>
                 <label style={{ display: "inline-flex", gap: "0.4rem" }}>
                   <input

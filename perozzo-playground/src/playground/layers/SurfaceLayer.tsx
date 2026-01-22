@@ -106,6 +106,23 @@ type SurfaceLayerProps = {
     }[]
   >;
   valueStyle?: LineStyle;
+  isotonicSegByCell?: Map<
+    string,
+    {
+      x1: number;
+      y1: number;
+      x2: number;
+      y2: number;
+      quantile: 25 | 50 | 75;
+    }[]
+  >;
+  isotonicStyle?: {
+    stroke: string;
+    thinWidth: number;
+    thickWidth: number;
+    thinOpacity: number;
+    thickOpacity: number;
+  };
 };
 
 type SegmentRenderItem = {
@@ -140,6 +157,8 @@ export default function SurfaceLayer({
   ageStyle,
   valueSegByCell,
   valueStyle,
+  isotonicSegByCell,
+  isotonicStyle,
   globalTriSort = false,
   drawQuads = true,
   drawSegments = true,
@@ -261,12 +280,30 @@ export default function SurfaceLayer({
             />
           ))
         : null;
+    const isotonicSegs = isotonicSegByCell?.get(quadKey);
+    const renderIsotonicSegs =
+      isotonicSegs && isotonicStyle
+        ? isotonicSegs.map((seg, segIndex) => (
+            <line
+              key={`isoseg-${seg.quantile}-${quadKey}-${segIndex}`}
+              x1={seg.x1}
+              y1={seg.y1}
+              x2={seg.x2}
+              y2={seg.y2}
+              stroke={isotonicStyle.stroke}
+              strokeWidth={isotonicStyle.thickWidth}
+              strokeOpacity={isotonicStyle.thickOpacity}
+              strokeLinecap="round"
+            />
+          ))
+        : null;
     const hasSegments =
       !!(
         renderYearSegs ||
         renderAgeSegs ||
         renderValueSegs ||
-        renderCohortSegs
+        renderCohortSegs ||
+        renderIsotonicSegs
       );
     return {
       segments: (
@@ -275,6 +312,7 @@ export default function SurfaceLayer({
           {renderAgeSegs}
           {renderValueSegs}
           {renderCohortSegs}
+          {renderIsotonicSegs}
         </>
       ),
       hasSegments,
@@ -296,11 +334,12 @@ export default function SurfaceLayer({
       stroke: string,
       strokeWidth: number,
       strokeOpacity: number,
-      extras?: { level?: number; isContour?: boolean; runId?: number }
+      extras?: { level?: number; isContour?: boolean; runId?: number },
+      depthBias = 0
     ) => {
       const depthKey =
         Number.isFinite(segDepth) && segDepth !== 0
-          ? segDepth
+          ? segDepth + depthBias
           : (seg.y1 + seg.y2) / 2;
       items.push({
         key,
@@ -370,6 +409,21 @@ export default function SurfaceLayer({
           cohortStyle.stroke,
           seg.heavy ? cohortStyle.thickWidth : cohortStyle.thinWidth,
           seg.heavy ? cohortStyle.thickOpacity : cohortStyle.thinOpacity
+        );
+      });
+    }
+    const isotonicSegs = isotonicSegByCell?.get(quadKey);
+    if (isotonicSegs && isotonicStyle) {
+      isotonicSegs.forEach((seg, segIndex) => {
+        pushSeg(
+          `isoseg-${seg.quantile}-${quadKey}-${segIndex}`,
+          `zz-iso-${quadKey}-${segIndex}`,
+          seg,
+          isotonicStyle.stroke,
+          isotonicStyle.thickWidth,
+          isotonicStyle.thickOpacity,
+          undefined,
+          2e-6
         );
       });
     }

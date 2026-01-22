@@ -6,6 +6,7 @@ import swedenCsv from "../data/porozzo-tidy.csv?raw";
 import swedenContours from "../data/porozzo-contours.json";
 import usaCsv from "../data/usa-pop-1900-2025-5yr-native-to100.csv?raw";
 import usaContours from "../data/usa-contours.json";
+import usaIsotonicCsv from "../data/usa-isotonic-quarters.csv?raw";
 
 type DatasetConfig = {
   label: string;
@@ -27,6 +28,7 @@ type DatasetConfig = {
   maxHeight: number;
   projectionTweaks?: { ageScaleMultiplier?: number; ageAxisAngleDeg?: number };
   showTitle: boolean;
+  isotonicCsvText?: string;
 };
 
 const DATASETS: Record<string, DatasetConfig> = {
@@ -49,6 +51,7 @@ const DATASETS: Record<string, DatasetConfig> = {
     rightWallMinorStep: 10_000,
     maxHeight: 3.0,
     showTitle: true,
+    isotonicCsvText: undefined,
   },
   usa: {
     label: "USA (1900–2025)",
@@ -69,7 +72,8 @@ const DATASETS: Record<string, DatasetConfig> = {
     rightWallMinorStep: 1_000_000,
     maxHeight: 2.6,
     projectionTweaks: { ageScaleMultiplier: 1.1, ageAxisAngleDeg: 140 },
-    showTitle: false,
+    showTitle: true,
+    isotonicCsvText: usaIsotonicCsv,
   },
 };
 
@@ -123,6 +127,7 @@ export default function AppDatasets() {
         maxHeight={active.maxHeight}
         projectionTweaks={active.projectionTweaks}
         showTitle={active.showTitle}
+        isotonicCsvText={active.isotonicCsvText}
         activeKey={datasetKey}
       />
     </div>

@@ -21,11 +21,23 @@ type TopViewProps = {
   ages: number[];
   rows: Array<{ year: number; age: number; survivors: number }>;
   contours: Array<{ level: number; points: YearAgePoint[]; runId?: number }>;
+  isotonicRows?: Array<{
+    year: number;
+    q25_age: number;
+    q50_age: number;
+    q75_age: number;
+  }>;
+  isotonicStyle?: {
+    stroke: string;
+    width: number;
+    opacity: number;
+  };
   showYears?: boolean;
   showAges?: boolean;
   showCohorts?: boolean;
   showContours?: boolean;
   showContourCrossings?: boolean;
+  showIsotonic?: boolean;
   contourMode?: "raw" | "segmented";
   svgRef?: Ref<SVGSVGElement>;
   padding?: {
@@ -68,11 +80,14 @@ export default function TopView({
   ages,
   rows,
   contours,
+  isotonicRows = [],
+  isotonicStyle,
   showYears = true,
   showAges = true,
   showCohorts = true,
   showContours = true,
   showContourCrossings = false,
+  showIsotonic = true,
   contourMode = "raw",
   svgRef,
   padding,
@@ -152,6 +167,25 @@ export default function TopView({
       />
     );
   };
+
+  const isotonicRuns = useMemo(() => {
+    if (!isotonicRows.length) return [];
+    const build = (field: "q25_age" | "q50_age" | "q75_age") =>
+      isotonicRows
+        .filter(
+          (row) =>
+            Number.isFinite(row.year) && Number.isFinite(row[field])
+        )
+        .map((row) => ({
+          x: scaleX(row.year),
+          y: scaleY(row[field]),
+        }));
+    return [
+      { key: "isotonic-25", pts: build("q25_age") },
+      { key: "isotonic-50", pts: build("q50_age") },
+      { key: "isotonic-75", pts: build("q75_age") },
+    ];
+  }, [isotonicRows, scaleX, scaleY]);
 
   const contourRuns = useMemo(
     () =>
@@ -550,6 +584,22 @@ export default function TopView({
               />
             );
           })}
+        {showIsotonic &&
+          isotonicStyle &&
+          isotonicRuns.map((run) =>
+            run.pts.length < 2 ? null : (
+              <polyline
+                key={run.key}
+                points={run.pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                fill="none"
+                stroke={isotonicStyle.stroke}
+                strokeWidth={isotonicStyle.width}
+                strokeOpacity={isotonicStyle.opacity}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )
+          )}
         {showContours && contourMode === "raw" && hover && (() => {
           const run = contourRuns.find((item) => item.runId === hover.runId);
           if (!run || run.pts.length < 2) return null;
