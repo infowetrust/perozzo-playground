@@ -3,7 +3,7 @@ import type { Frame3D } from "../../core/frame3d";
 import type { LineStyle } from "../vizConfig";
 import { isHeavy } from "../vizConfig";
 
-type BackWallIsolinesProps = {
+type Age0WallIsolinesProps = {
   frame: Frame3D;
   projection: ProjectionOptions;
   minYearExt: number;
@@ -13,7 +13,7 @@ type BackWallIsolinesProps = {
   style: LineStyle;
 };
 
-export default function BackWallIsolines({
+export default function Age0WallIsolines({
   frame,
   projection,
   minYearExt,
@@ -21,7 +21,7 @@ export default function BackWallIsolines({
   fullLevels,
   rightOnlyLevels,
   style,
-}: BackWallIsolinesProps) {
+}: Age0WallIsolinesProps) {
   const { yearStep } = frame;
 
   return (

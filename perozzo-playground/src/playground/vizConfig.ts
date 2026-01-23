@@ -49,8 +49,8 @@ export type ShadingConfig = {
   shadowBias: number;
   alphaScale: {
     surface: number;
-    backWall: number;
-    rightWall: number;
+    age0Wall: number;
+    wall2025: number;
     floor: number;
   };
 };

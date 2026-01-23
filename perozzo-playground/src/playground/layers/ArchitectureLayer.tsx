@@ -1,6 +1,6 @@
-import BackWallIsolines from "./BackWallIsolines";
+import Age0WallIsolines from "./Age0WallIsolines";
 import FloorAgeLines from "./FloorAgeLines";
-import RightWall from "./RightWall";
+import YearWall from "./YearWall";
 import type { Frame3D } from "../../core/frame3d";
 import type { ProjectionOptions } from "../../core/geometry";
 import type { Point3D } from "../../core/types";
@@ -16,7 +16,7 @@ type FloorAgeStyle = {
   strokeWidth: number;
 };
 
-type RightWallStyle = {
+type YearWallStyle = {
   wallFill: string;
   wallStroke: string;
   ageStroke: string;
@@ -46,12 +46,12 @@ type ArchitectureLayerProps = {
   floorFrameString: string;
   floorAlpha: number;
   shadingInkColor: string;
-  backWallStyle: LineStyle;
-  backwallFullLevels: number[];
-  backwallRightLevels: number[];
+  age0WallIsolineStyle: LineStyle;
+  age0WallFullLevels: number[];
+  age0Wall2025OnlyLevels: number[];
   floorStyle: FloorStyle;
   floorAgeStyle: FloorAgeStyle;
-  rightWallStyle: RightWallStyle;
+  wall2025Style: YearWallStyle;
   shadingConfig: ShadingConfig;
   surfacePoints: Point3D[];
   rows: number;
@@ -61,7 +61,7 @@ type ArchitectureLayerProps = {
   floorZ: number;
   valueStep: number;
   valueMinorStep: number;
-  showRightWall?: boolean;
+  showWall2025?: boolean;
 };
 
 export default function ArchitectureLayer({
@@ -74,12 +74,12 @@ export default function ArchitectureLayer({
   floorFrameString,
   floorAlpha,
   shadingInkColor,
-  backWallStyle,
-  backwallFullLevels,
-  backwallRightLevels,
+  age0WallIsolineStyle,
+  age0WallFullLevels,
+  age0Wall2025OnlyLevels,
   floorStyle,
   floorAgeStyle,
-  rightWallStyle,
+  wall2025Style,
   shadingConfig,
   surfacePoints,
   rows,
@@ -89,21 +89,21 @@ export default function ArchitectureLayer({
   floorZ,
   valueStep,
   valueMinorStep,
-  showRightWall = true,
+  showWall2025 = true,
 }: ArchitectureLayerProps) {
   const isUsaDataset = frame.maxYear >= 2025;
-  const backwallMinYearExt = isUsaDataset ? frame.maxYear : minYearExt;
+  const age0WallMinYearExt = isUsaDataset ? frame.maxYear : minYearExt;
   const floorExtendLeftYears = isUsaDataset ? 0 : extendLeftYears;
   return (
     <g id="layer-architecture">
-      <BackWallIsolines
+      <Age0WallIsolines
         frame={frame}
         projection={projection}
-        minYearExt={backwallMinYearExt}
+        minYearExt={age0WallMinYearExt}
         maxYearExt={maxYearExt}
-        fullLevels={backwallFullLevels}
-        rightOnlyLevels={backwallRightLevels}
-        style={backWallStyle}
+        fullLevels={age0WallFullLevels}
+        rightOnlyLevels={age0Wall2025OnlyLevels}
+        style={age0WallIsolineStyle}
       />
       <polygon
         points={floorFrameString}
@@ -126,8 +126,8 @@ export default function ArchitectureLayer({
         extendRightYears={extendRightYears}
         style={floorAgeStyle}
       />
-      {showRightWall && (
-        <RightWall
+      {showWall2025 && (
+        <YearWall
           surfacePoints={surfacePoints}
           rows={rows}
           cols={cols}
@@ -139,7 +139,7 @@ export default function ArchitectureLayer({
           valueMinorStep={valueMinorStep}
           frame={frame}
           shading={shadingConfig}
-          style={rightWallStyle}
+          style={wall2025Style}
         />
       )}
     </g>

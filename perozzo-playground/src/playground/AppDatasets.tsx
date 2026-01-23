@@ -19,12 +19,12 @@ type DatasetConfig = {
   valueLevels: {
     left: number[];
     right: number[];
-    backwallFull: number[];
-    backwallRightOnly: number[];
+    age0WallFull: number[];
+    age0Wall2025Only: number[];
   };
   valuesHeavyStep: number;
-  rightWallValueStep: number;
-  rightWallMinorStep: number;
+  wall2025ValueStep: number;
+  wall2025MinorStep: number;
   maxHeight: number;
   projectionTweaks?: { ageScaleMultiplier?: number; ageAxisAngleDeg?: number };
   showTitle: boolean;
@@ -43,12 +43,12 @@ const DATASETS: Record<string, DatasetConfig> = {
     valueLevels: {
       left: [50_000, 100_000, 150_000],
       right: [50_000, 100_000, 150_000, 200_000, 250_000],
-      backwallFull: [0, 50_000, 100_000, 150_000],
-      backwallRightOnly: [200_000, 250_000],
+      age0WallFull: [0, 50_000, 100_000, 150_000],
+      age0Wall2025Only: [200_000, 250_000],
     },
     valuesHeavyStep: 50_000,
-    rightWallValueStep: 50_000,
-    rightWallMinorStep: 10_000,
+    wall2025ValueStep: 50_000,
+    wall2025MinorStep: 10_000,
     maxHeight: 3.0,
     showTitle: true,
     isotonicCsvText: undefined,
@@ -64,12 +64,12 @@ const DATASETS: Record<string, DatasetConfig> = {
     valueLevels: {
       left: [5_000_000, 10_000_000, 15_000_000],
       right: [5_000_000, 10_000_000, 15_000_000],
-      backwallFull: [0, 5_000_000, 10_000_000, 15_000_000],
-      backwallRightOnly: [],
+      age0WallFull: [0, 5_000_000, 10_000_000, 15_000_000],
+      age0Wall2025Only: [],
     },
     valuesHeavyStep: 5_000_000,
-    rightWallValueStep: 5_000_000,
-    rightWallMinorStep: 1_000_000,
+    wall2025ValueStep: 5_000_000,
+    wall2025MinorStep: 1_000_000,
     maxHeight: 2.6,
     projectionTweaks: { ageScaleMultiplier: 1.1, ageAxisAngleDeg: 140 },
     showTitle: true,
@@ -122,8 +122,8 @@ export default function AppDatasets() {
         title={active.title}
         valueLevels={active.valueLevels}
         valuesHeavyStep={active.valuesHeavyStep}
-        rightWallValueStep={active.rightWallValueStep}
-        rightWallMinorStep={active.rightWallMinorStep}
+        wall2025ValueStep={active.wall2025ValueStep}
+        wall2025MinorStep={active.wall2025MinorStep}
         maxHeight={active.maxHeight}
         projectionTweaks={active.projectionTweaks}
         showTitle={active.showTitle}

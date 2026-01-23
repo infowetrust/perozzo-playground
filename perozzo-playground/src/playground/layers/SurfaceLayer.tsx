@@ -28,6 +28,7 @@ type SurfaceLayerProps = {
   quads: Quad[];
   cells?: CellRender[];
   globalTriSort?: boolean;
+  depthSortSign?: 1 | -1;
   surfaceStyle: {
     fill: string;
     stroke: string;
@@ -160,6 +161,7 @@ export default function SurfaceLayer({
   isotonicSegByCell,
   isotonicStyle,
   globalTriSort = false,
+  depthSortSign = 1,
   drawQuads = true,
   drawSegments = true,
 }: SurfaceLayerProps) {
@@ -291,8 +293,16 @@ export default function SurfaceLayer({
               x2={seg.x2}
               y2={seg.y2}
               stroke={isotonicStyle.stroke}
-              strokeWidth={isotonicStyle.thickWidth}
-              strokeOpacity={isotonicStyle.thickOpacity}
+              strokeWidth={
+                seg.quantile === 50
+                  ? isotonicStyle.thickWidth
+                  : isotonicStyle.thinWidth
+              }
+              strokeOpacity={
+                seg.quantile === 50
+                  ? isotonicStyle.thickOpacity
+                  : isotonicStyle.thinOpacity
+              }
               strokeLinecap="round"
             />
           ))
@@ -415,13 +425,14 @@ export default function SurfaceLayer({
     const isotonicSegs = isotonicSegByCell?.get(quadKey);
     if (isotonicSegs && isotonicStyle) {
       isotonicSegs.forEach((seg, segIndex) => {
+        const thick = seg.quantile === 50;
         pushSeg(
           `isoseg-${seg.quantile}-${quadKey}-${segIndex}`,
           `zz-iso-${quadKey}-${segIndex}`,
           seg,
           isotonicStyle.stroke,
-          isotonicStyle.thickWidth,
-          isotonicStyle.thickOpacity,
+          thick ? isotonicStyle.thickWidth : isotonicStyle.thinWidth,
+          thick ? isotonicStyle.thickOpacity : isotonicStyle.thinOpacity,
           undefined,
           2e-6
         );
@@ -551,13 +562,15 @@ export default function SurfaceLayer({
         extend(true);
         extend(false);
         if (chain.length >= 2) {
+          const nearBias = depthSortSign > 0 ? 1e-6 : -1e-6;
+          const farBias = depthSortSign > 0 ? -1e-6 : 1e-6;
           results.push({
             level,
             points: chain,
             depthKey:
               level === 20_000_000 && runId === 29
-                ? minDepth - 1e-6
-                : maxDepth + 1e-6,
+                ? minDepth + farBias
+                : maxDepth + nearBias,
           });
         }
       }
@@ -595,6 +608,7 @@ export default function SurfaceLayer({
         for (const cell of cells) {
           const cellDepth = cellDepthByKey.get(cell.cellKey) ?? 0;
           let maxTriDepth = -Infinity;
+          let minTriDepth = Infinity;
           cell.tris.forEach((tri, triIndex) => {
             const depthKey =
               (tri.pts3[0].x +
@@ -608,6 +622,7 @@ export default function SurfaceLayer({
                 tri.pts3[2].z) /
               3;
             if (depthKey > maxTriDepth) maxTriDepth = depthKey;
+            if (depthKey < minTriDepth) minTriDepth = depthKey;
             renderItems.push({
               kind: "tri",
               key: `tri-${cell.cellKey}-${triIndex}`,
@@ -620,8 +635,13 @@ export default function SurfaceLayer({
           });
           if (drawSegments) {
             const segDepth =
-              Number.isFinite(maxTriDepth) && maxTriDepth > -Infinity
-                ? maxTriDepth + 1e-6
+              Number.isFinite(maxTriDepth) &&
+              maxTriDepth > -Infinity &&
+              Number.isFinite(minTriDepth) &&
+              minTriDepth < Infinity
+                ? depthSortSign > 0
+                  ? maxTriDepth + 1e-6
+                  : minTriDepth - 1e-6
                 : cellDepth;
             const segItems = buildSegmentItemsForCell(cell.cellKey, segDepth);
             for (const seg of segItems) {
@@ -648,7 +668,9 @@ export default function SurfaceLayer({
           });
         });
         renderItems.sort((a, b) => {
-          if (a.depthKey !== b.depthKey) return a.depthKey - b.depthKey;
+          if (a.depthKey !== b.depthKey) {
+            return (a.depthKey - b.depthKey) * depthSortSign;
+          }
           return a.tieKey.localeCompare(b.tieKey);
         });
         return (

@@ -28,9 +28,11 @@ type WallStyle = {
   surfaceStrokeWidth?: number;
 };
 
-type RightWallProps = {
+type YearWallProps = {
   surfacePoints: Point3D[];
   topEdge2D?: Point2D[];
+  wallYear?: number;
+  colIndex?: number;
   rows: number;
   cols: number;
   projection: ProjectionOptions;
@@ -52,17 +54,23 @@ type RightWallProps = {
     shadowBias: number;
     alphaScale?: {
       surface?: number;
-      backWall?: number;
-      rightWall?: number;
+      age0Wall?: number;
+      wall2025?: number;
       floor?: number;
     };
   };
   style: WallStyle;
 };
 
-export default function RightWall({
+const DEBUG_WALL_GRID = true;
+const DEBUG_WALL_CLIP = false;
+let loggedWallGridOnce = false;
+
+export default function YearWall({
   surfacePoints,
   topEdge2D,
+  wallYear,
+  colIndex,
   rows,
   cols,
   projection,
@@ -74,7 +82,8 @@ export default function RightWall({
   frame,
   shading,
   style,
-}: RightWallProps) {
+}: YearWallProps) {
+  const DEBUG_LOG_KEY = "reverse-1900";
   if (rows <= 0 || cols <= 0 || surfacePoints.length === 0) {
     return null;
   }
@@ -82,7 +91,8 @@ export default function RightWall({
   void valueStep;
 
   const colMax = cols - 1;
-  const yearMax = frame.maxYear;
+  const wallCol = colIndex ?? colMax;
+  const yearMax = wallYear ?? frame.maxYear;
   const ageStart = ages[0] ?? 0;
   const ageEnd = ages[ages.length - 1] ?? ageStart;
   const shadingConfig = shading && shading.enabled ? shading : null;
@@ -110,10 +120,11 @@ export default function RightWall({
         inkAlphaMax: shadingConfig.inkAlphaMax,
         gamma: shadingConfig.gamma,
         shadowBias: shadingConfig.shadowBias,
-        alphaScale: shadingConfig.alphaScale?.rightWall ?? 1,
+        alphaScale: shadingConfig.alphaScale?.wall2025 ?? 1,
       })
       : 0;
-  const clipPathId = "rightWallClip";
+  const clipPathId =
+    wallYear != null ? `yearWallClip-${wallYear}` : `yearWallClip-${wallCol}`;
 
   let wallTop: Point2D[] = topEdge2D ? [...topEdge2D] : [];
   let wallFloor: Point2D[] = ages.map((age) =>
@@ -121,7 +132,7 @@ export default function RightWall({
   );
   if (wallTop.length === 0) {
     for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
-      const topPoint3D = surfacePoints[rowIndex * cols + colMax];
+      const topPoint3D = surfacePoints[rowIndex * cols + wallCol];
       if (!topPoint3D) continue;
       wallTop.push(projectIso(topPoint3D, projection));
     }
@@ -132,7 +143,7 @@ export default function RightWall({
 
   const wallBottom = [...wallFloor].reverse();
   const polygonPoints = [...wallTop, ...wallBottom];
-  const rightWallPolyString = polygonPoints
+  const yearWallPolyString = polygonPoints
     .map((p) => `${p.x},${p.y}`)
     .join(" ");
 
@@ -155,8 +166,8 @@ export default function RightWall({
   const ageBaseLine = ageLines[0];
   const ageLinesInner = ageLines.slice(1);
 
-  const edgeStart3D = surfacePoints[0 * cols + colMax];
-  const edgeEnd3D = surfacePoints[(rows - 1) * cols + colMax];
+  const edgeStart3D = surfacePoints[0 * cols + wallCol];
+  const edgeEnd3D = surfacePoints[(rows - 1) * cols + wallCol];
   const zSpan = frame.maxZ - floorZ || 1;
   const zForValue = (level: number) =>
     frame.maxSurvivors > 0
@@ -242,24 +253,40 @@ export default function RightWall({
   }
   const valueZeroLine = valueLines.find((line) => line.key === "val-0");
   const valueLinesInner = valueLines.filter((line) => line.key !== "val-0");
+  if (
+    DEBUG_WALL_GRID &&
+    !loggedWallGridOnce &&
+    typeof wallYear === "number" &&
+    wallYear === frame.minYear &&
+    DEBUG_LOG_KEY === "reverse-1900"
+  ) {
+    loggedWallGridOnce = true;
+    console.log("[WALL GRID COUNTS]", {
+      wallYear,
+      ages: ageLines.length,
+      ageInner: ageLinesInner.length,
+      values: valueLines.length,
+      valueInner: valueLinesInner.length,
+    });
+  }
 
   return (
     <>
       <defs>
-        <clipPath id={clipPathId}>
-          <polygon points={rightWallPolyString} />
+        <clipPath id={clipPathId} clipPathUnits="userSpaceOnUse">
+          <polygon points={yearWallPolyString} />
         </clipPath>
       </defs>
 
       <polygon
-        points={rightWallPolyString}
+        points={yearWallPolyString}
         fill={style.surfaceFill}
         stroke={style.wallStroke}
         strokeWidth={style.surfaceStrokeWidth}
       />
       {wallAlpha > 0 && shadingConfig && (
         <polygon
-          points={rightWallPolyString}
+          points={yearWallPolyString}
           fill={shadingConfig.inkColor}
           fillOpacity={Math.min(1, wallAlpha)}
           stroke="none"
@@ -299,6 +326,15 @@ export default function RightWall({
           />
         ))}
       </g>
+      {DEBUG_WALL_CLIP && (
+        <polygon
+          points={yearWallPolyString}
+          fill="none"
+          stroke="magenta"
+          strokeWidth={2.5}
+          strokeOpacity={0.8}
+        />
+      )}
       {ageBaseLine && (
         <line
           x1={insetPoint(ageBaseLine.top).x}

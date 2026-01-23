@@ -1,4 +1,5 @@
 import TitleBlock from "./TitleBlock";
+import TitleBlockUSA from "./TitleBlockUSA";
 import AgeLabels from "./AgeLabels";
 import ValueIsolineLabels from "./ValueIsolineLabels";
 import YearLabels from "./YearLabels";
@@ -30,6 +31,21 @@ type LabelsLayerProps = {
   showTitle?: boolean;
   valueLabelFormat?: "millions";
   age100Text?: string;
+  ageLabelSideOverride?: "left" | "right" | "both";
+  ageLabelTextAnchorOverride?: "start" | "middle" | "end";
+  ageLabelShowLeaders?: boolean;
+  ageLabelLeaderScale?: number;
+  ageLabelLeaderOffset?: number;
+  valueLabelSideOverride?: "left" | "right" | "both";
+  valueLabelTextAnchorOverride?: "start" | "middle" | "end";
+  valueLabelShowLeaders?: boolean;
+  valueLabelLeaderScale?: number;
+  valueLabelLeaderOffset?: number;
+  valueLabelIncludeZero?: boolean;
+  yearBottomAngleDeg?: number;
+  yearBottomYOffset?: number;
+  yearBottomXOffset?: number;
+  yearBottomAnchorAge?: number;
   titleProps: {
     x: number;
     y: number;
@@ -39,6 +55,7 @@ type LabelsLayerProps = {
       values: string;
       cohorts: string;
       years: string;
+      quadrants?: string;
       thin: number;
       thick: number;
     };
@@ -47,6 +64,7 @@ type LabelsLayerProps = {
       years?: string;
     };
   };
+  titleVariant?: "usa";
   topValueByYear: Record<number, number>;
   yearLabelSides?: ("top" | "bottom")[];
 };
@@ -64,9 +82,25 @@ export default function LabelsLayer({
   showTitle = true,
   valueLabelFormat,
   age100Text,
+  ageLabelSideOverride,
+  ageLabelTextAnchorOverride,
+  ageLabelShowLeaders,
+  ageLabelLeaderScale,
+  ageLabelLeaderOffset,
+  valueLabelSideOverride,
+  valueLabelTextAnchorOverride,
+  valueLabelShowLeaders,
+  valueLabelLeaderScale,
+  valueLabelLeaderOffset,
+  valueLabelIncludeZero,
+  yearBottomAngleDeg,
+  yearBottomYOffset,
+  yearBottomXOffset,
+  yearBottomAnchorAge,
   titleProps,
   topValueByYear,
   yearLabelSides,
+  titleVariant,
 }: LabelsLayerProps) {
   const ageLabelStyle: AxisLabelStyle = {
     ...axisLabelBaseStyle,
@@ -87,24 +121,33 @@ export default function LabelsLayer({
         projection={projection}
         minYearExt={minYearExt}
         maxYearExt={maxYearExt}
-        side={axisLabelLayout.side}
+        side={ageLabelSideOverride ?? axisLabelLayout.side}
         tickLen={axisLabelLayout.tickLen}
         textOffset={axisLabelLayout.textOffset}
         style={ageLabelStyle}
         age100Text={age100Text}
+        textAnchorOverride={ageLabelTextAnchorOverride}
+        showLeaders={ageLabelShowLeaders}
+        leaderScale={ageLabelLeaderScale}
+        leaderOffset={ageLabelLeaderOffset}
       />
       <ValueIsolineLabels
         frame={frame}
         projection={projection}
         minYearExt={minYearExt}
         maxYearExt={maxYearExt}
-        side={axisLabelLayout.side}
+        side={valueLabelSideOverride ?? axisLabelLayout.side}
         tickLen={axisLabelLayout.tickLen}
         textOffset={axisLabelLayout.textOffset}
         style={valueLabelStyle}
         leftLevels={valueLevels.left}
         rightLevels={valueLevels.right}
         labelFormat={valueLabelFormat}
+        textAnchorOverride={valueLabelTextAnchorOverride}
+        showLeaders={valueLabelShowLeaders}
+        leaderScale={valueLabelLeaderScale}
+        leaderOffset={valueLabelLeaderOffset}
+        includeZeroLevel={valueLabelIncludeZero}
       />
       <YearLabels
         frame={frame}
@@ -116,11 +159,33 @@ export default function LabelsLayer({
         tickLen={axisLabelLayout.tickLen}
         textOffset={axisLabelLayout.textOffset}
         style={yearLabelStyle}
-        bottomAngleDeg={-50}
+        bottomAngleDeg={yearBottomAngleDeg ?? -50}
+        bottomYOffset={yearBottomYOffset}
+        bottomXOffset={yearBottomXOffset}
+        bottomAnchorAge={yearBottomAnchorAge}
         topValueByYear={topValueByYear}
         labelSides={yearLabelSides}
       />
-      {showTitle !== false && <TitleBlock {...titleProps} />}
+      {showTitle !== false &&
+        (titleVariant === "usa" && titleProps.legend.quadrants ? (
+          <TitleBlockUSA
+            x={titleProps.x}
+            y={titleProps.y}
+            style={titleProps.style}
+            legend={{
+              ages: titleProps.legend.ages,
+              values: titleProps.legend.values,
+              cohorts: titleProps.legend.cohorts,
+              years: titleProps.legend.years,
+              quadrants: titleProps.legend.quadrants,
+              thin: titleProps.legend.thin,
+              thick: titleProps.legend.thick,
+            }}
+            title={titleProps.title}
+          />
+        ) : (
+          <TitleBlock {...titleProps} />
+        ))}
     </g>
   );
 }

@@ -15,6 +15,10 @@ type AgeLabelsProps = {
   textOffset: number;
   style: AxisLabelStyle;
   age100Text?: string;
+  textAnchorOverride?: "start" | "middle" | "end";
+  showLeaders?: boolean;
+  leaderScale?: number;
+  leaderOffset?: number;
 };
 
 const LABEL_AGES = [0, 25, 50, 75, 100];
@@ -36,6 +40,10 @@ export default function AgeLabels({
   textOffset,
   style,
   age100Text,
+  textAnchorOverride,
+  showLeaders = false,
+  leaderScale = 1,
+  leaderOffset = 0,
 }: AgeLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
@@ -76,17 +84,29 @@ export default function AgeLabels({
           const anchor = projectIso(frame.point(baseYear, age, 0), projection);
           const dir = dirForAge(age, s, baseYear, inwardYear);
           const textPos = {
-            x: anchor.x + dir.x * (tickLen + textOffset),
-            y: anchor.y + dir.y * (tickLen + textOffset),
+            x: anchor.x + dir.x * (tickLen * leaderScale + textOffset + leaderOffset),
+            y: anchor.y + dir.y * (tickLen * leaderScale + textOffset + leaderOffset),
           };
 
           return (
             <g key={`age-label-${s}-${age}`}>
+              {showLeaders && (
+                <line
+                  x1={anchor.x}
+                  y1={anchor.y}
+                  x2={anchor.x + dir.x * tickLen * leaderScale}
+                  y2={anchor.y + dir.y * tickLen * leaderScale}
+                  stroke={style.color}
+                  strokeOpacity={style.opacity}
+                  strokeWidth={1}
+                  strokeLinecap="round"
+                />
+              )}
               <text
                 x={textPos.x}
                 y={textPos.y}
                 dominantBaseline="middle"
-                textAnchor={s === "right" ? "start" : "end"}
+                textAnchor={textAnchorOverride ?? (s === "right" ? "start" : "end")}
                 fill={style.color}
                 fillOpacity={style.opacity}
                 fontFamily={style.fontFamily}

@@ -19,6 +19,9 @@ type YearLabelsProps = {
   bottomAngleDeg: number;
   topValueByYear: Record<number, number>;
   labelSides?: LabelSide[];
+  bottomYOffset?: number;
+  bottomXOffset?: number;
+  bottomAnchorAge?: number;
 };
 
 const formatYear = (year: number) => `${year}`;
@@ -43,6 +46,9 @@ export default function YearLabels({
   bottomAngleDeg,
   topValueByYear,
   labelSides,
+  bottomYOffset = 0,
+  bottomXOffset = 0,
+  bottomAnchorAge = 100,
 }: YearLabelsProps) {
   const firstYear = years[0];
   const lastYear = years[years.length - 1];
@@ -68,7 +74,7 @@ export default function YearLabels({
       {majorYears.map((year) =>
         labelPositions.map((side) => {
           const clampedYear = clampYear(year);
-          const age = side === "top" ? 0 : 100;
+          const age = side === "top" ? 0 : bottomAnchorAge;
           const topValue = topValueByYear[year] ?? topValueByYear[clampedYear] ?? 0;
           const anchor = projectIso(
             side === "top"
@@ -92,10 +98,10 @@ export default function YearLabels({
             x:
               anchor.x +
               dir.x * (tickLen + baseOffset) +
-              (side === "bottom" ? BOTTOM_X_SHIFT : 0),
+              (side === "bottom" ? BOTTOM_X_SHIFT + bottomXOffset : 0),
             y:
               anchor.y + dir.y * (tickLen + baseOffset) +
-              (side === "bottom" ? 12 : 0),
+              (side === "bottom" ? 12 + bottomYOffset : 0),
           };
           const rotation =
             side === "top" ? 270 : bottomAngleDeg;

@@ -29,7 +29,8 @@ type TopViewProps = {
   }>;
   isotonicStyle?: {
     stroke: string;
-    width: number;
+    thinWidth: number;
+    thickWidth: number;
     opacity: number;
   };
   showYears?: boolean;
@@ -181,9 +182,9 @@ export default function TopView({
           y: scaleY(row[field]),
         }));
     return [
-      { key: "isotonic-25", pts: build("q25_age") },
-      { key: "isotonic-50", pts: build("q50_age") },
-      { key: "isotonic-75", pts: build("q75_age") },
+      { key: "isotonic-25", pts: build("q25_age"), quantile: 25 },
+      { key: "isotonic-50", pts: build("q50_age"), quantile: 50 },
+      { key: "isotonic-75", pts: build("q75_age"), quantile: 75 },
     ];
   }, [isotonicRows, scaleX, scaleY]);
 
@@ -593,7 +594,11 @@ export default function TopView({
                 points={run.pts.map((p) => `${p.x},${p.y}`).join(" ")}
                 fill="none"
                 stroke={isotonicStyle.stroke}
-                strokeWidth={isotonicStyle.width}
+                strokeWidth={
+                  run.quantile === 50
+                    ? isotonicStyle.thickWidth
+                    : isotonicStyle.thinWidth
+                }
                 strokeOpacity={isotonicStyle.opacity}
                 strokeLinecap="round"
                 strokeLinejoin="round"

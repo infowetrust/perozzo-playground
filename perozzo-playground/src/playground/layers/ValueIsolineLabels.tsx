@@ -17,6 +17,11 @@ type ValueIsolineLabelsProps = {
   leftLevels: number[];
   rightLevels: number[];
   labelFormat?: "millions";
+  textAnchorOverride?: "start" | "middle" | "end";
+  showLeaders?: boolean;
+  leaderScale?: number;
+  leaderOffset?: number;
+  includeZeroLevel?: boolean;
 };
 
 export default function ValueIsolineLabels({
@@ -31,12 +36,19 @@ export default function ValueIsolineLabels({
   leftLevels,
   rightLevels,
   labelFormat,
+  textAnchorOverride,
+  showLeaders = false,
+  leaderScale = 1,
+  leaderOffset = 0,
+  includeZeroLevel = false,
 }: ValueIsolineLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
 
-  const levelsForSide = (s: LabelSide): number[] =>
-    s === "right" ? rightLevels : leftLevels;
+  const levelsForSide = (s: LabelSide): number[] => {
+    const base = s === "right" ? rightLevels : leftLevels;
+    return includeZeroLevel && !base.includes(0) ? [0, ...base] : base;
+  };
 
   const baseYearFor = (s: LabelSide): number => {
     if (s === "right") {
@@ -79,17 +91,29 @@ export default function ValueIsolineLabels({
           );
           const dir = dirForLevel(level, s, baseYear, inwardYear);
           const textPos = {
-            x: anchor.x + dir.x * (tickLen + textOffset),
-            y: anchor.y + dir.y * (tickLen + textOffset),
+            x: anchor.x + dir.x * (tickLen * leaderScale + textOffset + leaderOffset),
+            y: anchor.y + dir.y * (tickLen * leaderScale + textOffset + leaderOffset),
           };
 
           return (
             <g key={`value-label-${s}-${level}`}>
+              {showLeaders && (
+                <line
+                  x1={anchor.x}
+                  y1={anchor.y}
+                  x2={anchor.x + dir.x * tickLen * leaderScale}
+                  y2={anchor.y + dir.y * tickLen * leaderScale}
+                  stroke={style.color}
+                  strokeOpacity={style.opacity}
+                  strokeWidth={1}
+                  strokeLinecap="round"
+                />
+              )}
               <text
                 x={textPos.x}
                 y={textPos.y}
                 dominantBaseline="middle"
-                textAnchor={s === "right" ? "start" : "end"}
+                textAnchor={textAnchorOverride ?? (s === "right" ? "start" : "end")}
                 fill={style.color}
                 fillOpacity={style.opacity}
                 fontFamily={style.fontFamily}

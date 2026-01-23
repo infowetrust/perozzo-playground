@@ -3,7 +3,7 @@
  * Picks parameters, calls core functions, draws marks.
  * Keeps React focused on layout, not math.
  */
-import { useState, useRef, useMemo, useEffect } from "react";
+import { useState, useRef, useMemo, useEffect, useCallback } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   floorPolygon,
@@ -26,7 +26,7 @@ import ArchitectureLayer from "./layers/ArchitectureLayer";
 import SurfaceLayer from "./layers/SurfaceLayer";
 import LabelsLayer from "./layers/LabelsLayer";
 import InteractionLayer from "./layers/InteractionLayer";
-import RightWall from "./layers/RightWall";
+import YearWall from "./layers/YearWall";
 import TopView from "./layers/TopView";
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
@@ -55,13 +55,13 @@ type PlateVizProps = {
   valueLevels?: {
     left: number[];
     right: number[];
-    backwallFull: number[];
-    backwallRightOnly: number[];
+    age0WallFull: number[];
+    age0Wall2025Only: number[];
   };
   showTitle?: boolean;
   valuesHeavyStep?: number;
-  rightWallValueStep?: number;
-  rightWallMinorStep?: number;
+  wall2025ValueStep?: number;
+  wall2025MinorStep?: number;
   maxHeight?: number;
   projectionTweaks?: {
     ageScaleMultiplier?: number;
@@ -80,8 +80,8 @@ const DEFAULT_FRAME_MAX_VALUE = 325_000;
 const DEFAULT_VALUE_LEVELS = {
   left: [50_000, 100_000, 150_000],
   right: [50_000, 100_000, 150_000, 200_000, 250_000],
-  backwallFull: [0, 50_000, 100_000, 150_000],
-  backwallRightOnly: [200_000, 250_000],
+  age0WallFull: [0, 50_000, 100_000, 150_000],
+  age0Wall2025Only: [200_000, 250_000],
 };
 const DEBUG_CONTOUR_PROJ = false;
 const DEBUG_CONTOUR_LEVEL = 10_000_000;
@@ -90,7 +90,7 @@ const FEATURES = {
   labels: true,
   hover: true,
   exportSvg: true,
-  rightWall: true,
+  wall2025: true,
   occlusion: true,
 };
 
@@ -142,7 +142,7 @@ const vizStyle = {
     stroke: "none" as "none",
   },
   wall: {
-    fill: "none",
+    fill: "#f0e6d6",
     stroke: "none" as "none",
   },
   surface: {
@@ -171,7 +171,7 @@ const vizStyle = {
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
     thinOpacity: LINE_THIN_OPACITY,
-    thickOpacity: LINE_THICK_OPACITY,
+    thickOpacity: .6,// LINE_THICK_OPACITY,
     heavyStep: 25, // emphasize every ## years
   },
   values: {
@@ -179,7 +179,7 @@ const vizStyle = {
     thinWidth: LINE_THIN_WIDTH,
     thickWidth: LINE_THICK_WIDTH,
     thinOpacity: LINE_THIN_OPACITY,
-    thickOpacity: LINE_THICK_OPACITY,
+    thickOpacity: .7,//LINE_THICK_OPACITY,
     heavyStep: 50_000,
   },
   // lightDir is the *direction the light is coming from* in our model’s 3D (core) space.
@@ -239,8 +239,8 @@ const vizStyle = {
     // higher alpha scale is darker
     alphaScale: {
       surface: 1,     // Sweden was 1
-      backWall: .5,
-      rightWall: 0.2, // Sweden was 0.5
+      age0Wall: .5,
+      wall2025: 0.2, // Sweden was 0.5
       floor: 0,
     },
   },
@@ -934,8 +934,8 @@ export default function PlateViz({
   valueLevels,
   showTitle,
   valuesHeavyStep,
-  rightWallValueStep,
-  rightWallMinorStep,
+  wall2025ValueStep,
+  wall2025MinorStep,
   maxHeight = 3,
   projectionTweaks,
   activeKey,
@@ -1122,9 +1122,9 @@ export default function PlateViz({
   const valueLevelConfig = valueLevels ?? DEFAULT_VALUE_LEVELS;
   const activeValuesHeavyStep =
     valuesHeavyStep ?? vizStyle.values.heavyStep;
-  const activeRightWallValueStep =
-    rightWallValueStep ?? activeValuesHeavyStep;
-  const activeRightWallMinorStep = rightWallMinorStep ?? 10_000;
+  const activeWall2025ValueStep =
+    wall2025ValueStep ?? activeValuesHeavyStep;
+  const activeWall2025MinorStep = wall2025MinorStep ?? 10_000;
   const topValueByYear = useMemo(() => {
     const map: Record<number, number> = {};
     for (const row of swedenRows) {
@@ -1179,547 +1179,582 @@ export default function PlateViz({
     projectionTweaks?.ageAxisAngleDeg,
   ]);
 
-  const model = useMemo(() => {
-    const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight });
-    const { points: surfacePoints, rows, cols, years, ages } = swedenSurface;
-    const maxSurvivors = swedenRows.reduce(
-      (max, row) => Math.max(max, row.survivors),
-      0
-    );
-    const frame = makeFrame3D({
-      surfacePoints,
-      rows,
-      cols,
-      years,
-      ages,
-      floorZ: FLOOR_DEPTH,
-      maxSurvivors,
-    });
-    const minYearExt = frame.minYear - EXTEND_LEFT_YEARS;
-    const maxYearExt = frame.maxYear + EXTEND_RIGHT_YEARS;
-    const projectedSurface = projectSurface(surfacePoints, projection);
-    const floorPoints = floorPolygon(rows, cols, FLOOR_DEPTH, projection);
-    const silhouettePts = buildSurfaceSilhouette2D(
-      projectedSurface,
-      rows,
-      cols
-    );
-    const quads = buildQuads(surfacePoints, rows, cols, projection);
-    const cellMap = new Map<string, CellRender>();
-    let split4Count = 0;
-    const triangles = TRI_RENDER.enabled
-      ? (() => {
-        const tris: {
-          pts2: [Point2D, Point2D, Point2D];
-          pts3: [Point3D, Point3D, Point3D];
-          depthKey: number;
-          cellKey: string;
-          cx: number;
-          cy: number;
-          isPrimaryForCell: boolean;
-        }[] = [];
-        for (const quad of quads) {
-          const [p00, p10, p11, p01] = quad.corners3D;
-          const [P00, P10, P11, P01] = quad.points2D;
-          const center3D = avg3D(p00, p10, p11, p01);
-          const center2D = projectIso(center3D, projection);
-          const diagCenter2D = diagIntersection2D(P00, P11, P10, P01);
-          const shouldSplit4 =
-            TRI_RENDER.split4Enabled &&
-            diagCenter2D !== null &&
-            dist2D(center2D, diagCenter2D) >= TRI_RENDER.split4CenterDiffPx;
-          const cellKey = `${quad.rowIndex}-${quad.colIndex}`;
-          if (shouldSplit4) {
-            const tris4: Tri2[] = [
-              {
-                pts2: [P00, P10, center2D] as [
-                  Point2D,
-                  Point2D,
-                  Point2D
-                ],
-                pts3: [p00, p10, center3D] as [
-                  Point3D,
-                  Point3D,
-                  Point3D
-                ],
-              },
-              {
-                pts2: [P10, P11, center2D] as [
-                  Point2D,
-                  Point2D,
-                  Point2D
-                ],
-                pts3: [p10, p11, center3D] as [
-                  Point3D,
-                  Point3D,
-                  Point3D
-                ],
-              },
-              {
-                pts2: [P11, P01, center2D] as [
-                  Point2D,
-                  Point2D,
-                  Point2D
-                ],
-                pts3: [p11, p01, center3D] as [
-                  Point3D,
-                  Point3D,
-                  Point3D
-                ],
-              },
-              {
-                pts2: [P01, P00, center2D] as [
-                  Point2D,
-                  Point2D,
-                  Point2D
-                ],
-                pts3: [p01, p00, center3D] as [
-                  Point3D,
-                  Point3D,
-                  Point3D
-                ],
-              },
-            ].map((tri) => {
-              const area2 = triArea2(tri.pts2[0], tri.pts2[1], tri.pts2[2]);
-              const absArea2 = Math.abs(area2);
-              if (area2 < 0) {
-                return {
-                  ...tri,
-                  pts2: [
-                    tri.pts2[0],
-                    tri.pts2[2],
-                    tri.pts2[1],
-                  ] as [Point2D, Point2D, Point2D],
-                  degenerate: absArea2 < TRI_RENDER.minArea2D,
-                };
-              }
-              return {
-                ...tri,
-                degenerate: absArea2 < TRI_RENDER.minArea2D,
-              };
-            });
-            const p00d = surfacePoints[quad.rowIndex * cols + quad.colIndex];
-            const p10d =
-              surfacePoints[quad.rowIndex * cols + (quad.colIndex + 1)];
-            const p11d =
-              surfacePoints[(quad.rowIndex + 1) * cols + (quad.colIndex + 1)];
-            const p01d =
-              surfacePoints[(quad.rowIndex + 1) * cols + quad.colIndex];
-            const avgDepth3D =
-              (pointDepth3D(p00d) +
-                pointDepth3D(p10d) +
-                pointDepth3D(p11d) +
-                pointDepth3D(p01d)) /
-              4;
-            const maxYDepth = Math.max(
-              ...tris4.flatMap((t) => t.pts2.map((p) => p.y))
-            );
-            const cellDepthKey =
-              CELL_SORT_MODE === "avgXYZ" ? avgDepth3D : maxYDepth;
-            cellMap.set(cellKey, {
-              cellKey,
-              depthKey: cellDepthKey,
-              tris: tris4,
-              split4: true,
-              splitCenter: center2D,
-            });
-            split4Count += 1;
-            continue;
-          }
-          const diagA = [
-            {
-              pts2: [P00, P10, P11] as [Point2D, Point2D, Point2D],
-              pts3: [p00, p10, p11] as [Point3D, Point3D, Point3D],
-            },
-            {
-              pts2: [P00, P11, P01] as [Point2D, Point2D, Point2D],
-              pts3: [p00, p11, p01] as [Point3D, Point3D, Point3D],
-            },
-          ];
-          const diagB = [
-            {
-              pts2: [P00, P10, P01] as [Point2D, Point2D, Point2D],
-              pts3: [p00, p10, p01] as [Point3D, Point3D, Point3D],
-            },
-            {
-              pts2: [P10, P11, P01] as [Point2D, Point2D, Point2D],
-              pts3: [p10, p11, p01] as [Point3D, Point3D, Point3D],
-            },
-          ];
-          const areaScore = (t: { pts2: [Point2D, Point2D, Point2D] }) =>
-            Math.abs(triArea2(t.pts2[0], t.pts2[1], t.pts2[2]));
-          const scoreA = Math.min(areaScore(diagA[0]), areaScore(diagA[1]));
-          const scoreB = Math.min(areaScore(diagB[0]), areaScore(diagB[1]));
-          const candidates = scoreA >= scoreB ? diagA : diagB;
-          const kept: {
+  const buildModel = useCallback(
+    (
+      proj: ProjectionOptions,
+      opts?: { depthSortSign?: 1 | -1; cullSign?: 1 | -1 }
+    ) => {
+      const projection = proj;
+      const depthSortSign = opts?.depthSortSign ?? 1;
+      const cullSign = opts?.cullSign ?? 1;
+      const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight });
+      const { points: surfacePoints, rows, cols, years, ages } = swedenSurface;
+      const maxSurvivors = swedenRows.reduce(
+        (max, row) => Math.max(max, row.survivors),
+        0
+      );
+      const frame = makeFrame3D({
+        surfacePoints,
+        rows,
+        cols,
+        years,
+        ages,
+        floorZ: FLOOR_DEPTH,
+        maxSurvivors,
+      });
+      const minYearExt = frame.minYear - EXTEND_LEFT_YEARS;
+      const maxYearExt = frame.maxYear + EXTEND_RIGHT_YEARS;
+      const projectedSurface = projectSurface(surfacePoints, projection);
+      const floorPoints = floorPolygon(rows, cols, FLOOR_DEPTH, projection);
+      const silhouettePts = buildSurfaceSilhouette2D(
+        projectedSurface,
+        rows,
+        cols
+      );
+      const quads = buildQuads(surfacePoints, rows, cols, projection);
+      const cellMap = new Map<string, CellRender>();
+      let split4Count = 0;
+      const triangles = TRI_RENDER.enabled
+        ? (() => {
+          const tris: {
             pts2: [Point2D, Point2D, Point2D];
             pts3: [Point3D, Point3D, Point3D];
             depthKey: number;
+            cellKey: string;
             cx: number;
             cy: number;
-            degenerate?: boolean;
+            isPrimaryForCell: boolean;
           }[] = [];
-          const triInfo = candidates.map((tri) => {
-            const [a, b, c] = tri.pts2;
-            const area2 = triArea2(a, b, c);
-            const absArea2 = Math.abs(area2);
-            const depthKey = triDepthKeyMaxY(a, b, c);
-            const centroid = avg3(a, b, c);
-            return {
-              tri,
-              area2,
-              absArea2,
-              depthKey,
-              centroid,
-            };
-          });
-          const frontFacingFlags = triInfo.map((info) => info.area2 > 0);
-          const shouldCullBoth =
-            TRI_RENDER.backfaceCull &&
-            TRI_RENDER.cullMode === "bothOnly" &&
-            !TRI_RENDER.keepBothTris &&
-            frontFacingFlags.every((f) => !f);
-          if (!shouldCullBoth) {
-            for (const info of triInfo) {
-              kept.push({
-                pts2: info.tri.pts2,
-                pts3: info.tri.pts3,
-                depthKey: info.depthKey,
-                cx: info.centroid.x,
-                cy: info.centroid.y,
-                degenerate: info.absArea2 < TRI_RENDER.minArea2D,
+          for (const quad of quads) {
+            const [p00, p10, p11, p01] = quad.corners3D;
+            const [P00, P10, P11, P01] = quad.points2D;
+            const center3D = avg3D(p00, p10, p11, p01);
+            const center2D = projectIso(center3D, projection);
+            const diagCenter2D = diagIntersection2D(P00, P11, P10, P01);
+            const shouldSplit4 =
+              TRI_RENDER.split4Enabled &&
+              diagCenter2D !== null &&
+              dist2D(center2D, diagCenter2D) >= TRI_RENDER.split4CenterDiffPx;
+            const cellKey = `${quad.rowIndex}-${quad.colIndex}`;
+            if (shouldSplit4) {
+              const tris4: Tri2[] = [
+                {
+                  pts2: [P00, P10, center2D] as [
+                    Point2D,
+                    Point2D,
+                    Point2D
+                  ],
+                  pts3: [p00, p10, center3D] as [
+                    Point3D,
+                    Point3D,
+                    Point3D
+                  ],
+                },
+                {
+                  pts2: [P10, P11, center2D] as [
+                    Point2D,
+                    Point2D,
+                    Point2D
+                  ],
+                  pts3: [p10, p11, center3D] as [
+                    Point3D,
+                    Point3D,
+                    Point3D
+                  ],
+                },
+                {
+                  pts2: [P11, P01, center2D] as [
+                    Point2D,
+                    Point2D,
+                    Point2D
+                  ],
+                  pts3: [p11, p01, center3D] as [
+                    Point3D,
+                    Point3D,
+                    Point3D
+                  ],
+                },
+                {
+                  pts2: [P01, P00, center2D] as [
+                    Point2D,
+                    Point2D,
+                    Point2D
+                  ],
+                  pts3: [p01, p00, center3D] as [
+                    Point3D,
+                    Point3D,
+                    Point3D
+                  ],
+                },
+              ].map((tri) => {
+                const area2 = triArea2(tri.pts2[0], tri.pts2[1], tri.pts2[2]);
+                const absArea2 = Math.abs(area2);
+                if (area2 < 0) {
+                  return {
+                    ...tri,
+                    pts2: [
+                      tri.pts2[0],
+                      tri.pts2[2],
+                      tri.pts2[1],
+                    ] as [Point2D, Point2D, Point2D],
+                    degenerate: absArea2 < TRI_RENDER.minArea2D,
+                  };
+                }
+                return {
+                  ...tri,
+                  degenerate: absArea2 < TRI_RENDER.minArea2D,
+                };
               });
-            }
-          }
-          if (kept.length > 0) {
-            let primaryIndex = 0;
-            for (let i = 1; i < kept.length; i++) {
-              if (kept[i].depthKey > kept[primaryIndex].depthKey) {
-                primaryIndex = i;
-              }
-            }
-            kept.forEach((tri, index) => {
-              tris.push({
-                ...tri,
-                cellKey,
-                isPrimaryForCell: index === primaryIndex,
-              });
-            });
-            const cellTris: Tri2[] = kept.map((tri) => ({
-              pts2: tri.pts2,
-              pts3: tri.pts3,
-              degenerate: tri.degenerate,
-            }));
-            if (cellTris.length > 0) {
-              const p00 = surfacePoints[quad.rowIndex * cols + quad.colIndex];
-              const p10 =
+              const p00d = surfacePoints[quad.rowIndex * cols + quad.colIndex];
+              const p10d =
                 surfacePoints[quad.rowIndex * cols + (quad.colIndex + 1)];
-              const p11 =
+              const p11d =
                 surfacePoints[(quad.rowIndex + 1) * cols + (quad.colIndex + 1)];
-              const p01 =
+              const p01d =
                 surfacePoints[(quad.rowIndex + 1) * cols + quad.colIndex];
               const avgDepth3D =
-                (pointDepth3D(p00) +
-                  pointDepth3D(p10) +
-                  pointDepth3D(p11) +
-                  pointDepth3D(p01)) /
+                (pointDepth3D(p00d) +
+                  pointDepth3D(p10d) +
+                  pointDepth3D(p11d) +
+                  pointDepth3D(p01d)) /
                 4;
               const maxYDepth = Math.max(
-                ...cellTris.flatMap((t) => t.pts2.map((p) => p.y))
+                ...tris4.flatMap((t) => t.pts2.map((p) => p.y))
               );
               const cellDepthKey =
                 CELL_SORT_MODE === "avgXYZ" ? avgDepth3D : maxYDepth;
               cellMap.set(cellKey, {
                 cellKey,
                 depthKey: cellDepthKey,
-                tris: cellTris,
+                tris: tris4,
+                split4: true,
+                splitCenter: center2D,
               });
+              split4Count += 1;
+              continue;
+            }
+            const diagA = [
+              {
+                pts2: [P00, P10, P11] as [Point2D, Point2D, Point2D],
+                pts3: [p00, p10, p11] as [Point3D, Point3D, Point3D],
+              },
+              {
+                pts2: [P00, P11, P01] as [Point2D, Point2D, Point2D],
+                pts3: [p00, p11, p01] as [Point3D, Point3D, Point3D],
+              },
+            ];
+            const diagB = [
+              {
+                pts2: [P00, P10, P01] as [Point2D, Point2D, Point2D],
+                pts3: [p00, p10, p01] as [Point3D, Point3D, Point3D],
+              },
+              {
+                pts2: [P10, P11, P01] as [Point2D, Point2D, Point2D],
+                pts3: [p10, p11, p01] as [Point3D, Point3D, Point3D],
+              },
+            ];
+            const areaScore = (t: { pts2: [Point2D, Point2D, Point2D] }) =>
+              Math.abs(triArea2(t.pts2[0], t.pts2[1], t.pts2[2]));
+            const scoreA = Math.min(areaScore(diagA[0]), areaScore(diagA[1]));
+            const scoreB = Math.min(areaScore(diagB[0]), areaScore(diagB[1]));
+            const candidates = scoreA >= scoreB ? diagA : diagB;
+            const kept: {
+              pts2: [Point2D, Point2D, Point2D];
+              pts3: [Point3D, Point3D, Point3D];
+              depthKey: number;
+              cx: number;
+              cy: number;
+              degenerate?: boolean;
+            }[] = [];
+            const triInfo = candidates.map((tri) => {
+              const [a, b, c] = tri.pts2;
+              const area2 = triArea2(a, b, c);
+              const absArea2 = Math.abs(area2);
+              const depthKey = triDepthKeyMaxY(a, b, c);
+              const centroid = avg3(a, b, c);
+              return {
+                tri,
+                area2,
+                absArea2,
+                depthKey,
+                centroid,
+              };
+            });
+            const frontFacingFlags = triInfo.map(
+              (info) => info.area2 * cullSign > 0
+            );
+            const shouldCullBoth =
+              TRI_RENDER.backfaceCull &&
+              TRI_RENDER.cullMode === "bothOnly" &&
+              !TRI_RENDER.keepBothTris &&
+              frontFacingFlags.every((f) => !f);
+            if (!shouldCullBoth) {
+              for (const info of triInfo) {
+                kept.push({
+                  pts2: info.tri.pts2,
+                  pts3: info.tri.pts3,
+                  depthKey: info.depthKey,
+                  cx: info.centroid.x,
+                  cy: info.centroid.y,
+                  degenerate: info.absArea2 < TRI_RENDER.minArea2D,
+                });
+              }
+            }
+            if (kept.length > 0) {
+              let primaryIndex = 0;
+              for (let i = 1; i < kept.length; i++) {
+                if (kept[i].depthKey > kept[primaryIndex].depthKey) {
+                  primaryIndex = i;
+                }
+              }
+              kept.forEach((tri, index) => {
+                tris.push({
+                  ...tri,
+                  cellKey,
+                  isPrimaryForCell: index === primaryIndex,
+                });
+              });
+              const cellTris: Tri2[] = kept.map((tri) => ({
+                pts2: tri.pts2,
+                pts3: tri.pts3,
+                degenerate: tri.degenerate,
+              }));
+              if (cellTris.length > 0) {
+                const p00 = surfacePoints[quad.rowIndex * cols + quad.colIndex];
+                const p10 =
+                  surfacePoints[quad.rowIndex * cols + (quad.colIndex + 1)];
+                const p11 =
+                  surfacePoints[(quad.rowIndex + 1) * cols + (quad.colIndex + 1)];
+                const p01 =
+                  surfacePoints[(quad.rowIndex + 1) * cols + quad.colIndex];
+                const avgDepth3D =
+                  (pointDepth3D(p00) +
+                    pointDepth3D(p10) +
+                    pointDepth3D(p11) +
+                    pointDepth3D(p01)) /
+                  4;
+                const maxYDepth = Math.max(
+                  ...cellTris.flatMap((t) => t.pts2.map((p) => p.y))
+                );
+                const cellDepthKey =
+                  CELL_SORT_MODE === "avgXYZ" ? avgDepth3D : maxYDepth;
+                cellMap.set(cellKey, {
+                  cellKey,
+                  depthKey: cellDepthKey,
+                  tris: cellTris,
+                });
+              }
             }
           }
+          tris.sort((a, b) => (a.depthKey - b.depthKey) * depthSortSign);
+          return tris;
+        })()
+        : [];
+      const cells = TRI_RENDER.enabled
+        ? [...cellMap.values()].sort(
+          (a, b) => (a.depthKey - b.depthKey) * depthSortSign
+        )
+        : [];
+      if (!triCellHistLogged && cells.length > 0) {
+        triCellHistLogged = true;
+        const hist: Record<number, number> = {};
+        for (const cell of cells) {
+          const count = cell.tris.length;
+          hist[count] = (hist[count] ?? 0) + 1;
         }
-        tris.sort((a, b) => a.depthKey - b.depthKey);
-        return tris;
-      })()
-      : [];
-    const cells = TRI_RENDER.enabled
-      ? [...cellMap.values()].sort((a, b) => a.depthKey - b.depthKey)
-      : [];
-    if (!triCellHistLogged && cells.length > 0) {
-      triCellHistLogged = true;
-      const hist: Record<number, number> = {};
-      for (const cell of cells) {
-        const count = cell.tris.length;
-        hist[count] = (hist[count] ?? 0) + 1;
+        // eslint-disable-next-line no-console
+        console.log("[TRI_CELL_TRI_COUNT_HIST]", hist);
       }
-      // eslint-disable-next-line no-console
-      console.log("[TRI_CELL_TRI_COUNT_HIST]", hist);
-    }
-    if (!split4CountLogged && TRI_RENDER.enabled && cells.length > 0) {
-      split4CountLogged = true;
-      // eslint-disable-next-line no-console
-      console.log("[TRI_SPLIT4_COUNT]", split4Count);
-    }
-    const yearLines = buildYearLines(projectedSurface, years, rows, cols);
-    const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
-    const cohortLines = buildCohortLines(
-      swedenRows,
-      projectedSurface,
-      years,
-      ages,
-      rows,
-      cols
-    );
-    const maxZByCol = new Array(cols).fill(-Infinity);
-    const birthZByCol = new Array(cols).fill(-Infinity);
-    for (let col = 0; col < cols; col++) {
-      for (let row = 0; row < rows; row++) {
-        const idx = row * cols + col;
-        const z = surfacePoints[idx]?.z ?? -Infinity;
-        if (z > maxZByCol[col]) {
-          maxZByCol[col] = z;
-        }
-        if (row === 0) {
-          birthZByCol[col] = z;
-        }
+      if (!split4CountLogged && TRI_RENDER.enabled && cells.length > 0) {
+        split4CountLogged = true;
+        // eslint-disable-next-line no-console
+        console.log("[TRI_SPLIT4_COUNT]", split4Count);
       }
-    }
-    const yearSegByQuad = new Map<string, YearSegment[]>();
-    for (const line of yearLines) {
-      const col = years.indexOf(line.year);
-      if (col === -1) continue;
-      const qc = Math.min(col, cols - 2);
-      for (let row = 0; row < rows - 1; row++) {
-        const p0 = line.points[row];
-        const p1 = line.points[row + 1];
-        if (!p0 || !p1) continue;
-        const key = `${row}-${qc}`;
-        const seg: YearSegment = {
-          x1: p0.x,
-          y1: p0.y,
-          x2: p1.x,
-          y2: p1.y,
-          heavy: line.heavy,
-          year: line.year,
-        };
-        const bucket = yearSegByQuad.get(key);
-        if (bucket) {
-          bucket.push(seg);
-        } else {
-          yearSegByQuad.set(key, [seg]);
-        }
-      }
-    }
-    const ageSegByQuad = new Map<string, AgeSegment[]>();
-    for (const line of ageLines) {
-      const row = ages.indexOf(line.age);
-      if (row < 0) continue;
-      const qr = Math.min(row, rows - 2);
-      for (let col = 0; col < cols - 1; col++) {
-        const p0 = line.points[col];
-        const p1 = line.points[col + 1];
-        if (!p0 || !p1) continue;
-        let visible: boolean | undefined;
-        if (line.age === 0) {
-          const isSkyline = (c: number) =>
-            birthZByCol[c] >= maxZByCol[c] - BIRTHS_SKYLINE_EPS;
-          visible = isSkyline(col) || isSkyline(col + 1);
-        }
-        const key = `${qr}-${col}`;
-        const seg: AgeSegment = {
-          x1: p0.x,
-          y1: p0.y,
-          x2: p1.x,
-          y2: p1.y,
-          heavy: line.heavy,
-          age: line.age,
-          visible,
-        };
-        const bucket = ageSegByQuad.get(key);
-        if (bucket) {
-          bucket.push(seg);
-        } else {
-          ageSegByQuad.set(key, [seg]);
-        }
-      }
-    }
-    const cohortSegByQuad = new Map<string, CohortSegment[]>();
-    for (const line of cohortLines) {
-      if (!line.indices || line.indices.length !== line.points.length) continue;
-      for (let i = 0; i < line.points.length - 1; i++) {
-        const idx0 = line.indices[i];
-        const idx1 = line.indices[i + 1];
-        const r0 = Math.floor(idx0 / cols);
-        const c0 = idx0 % cols;
-        const r1 = Math.floor(idx1 / cols);
-        const c1 = idx1 % cols;
-        const qr = Math.min(r0, r1);
-        const qc = Math.min(c0, c1);
-        const key = `${qr}-${qc}`;
-        const p0 = line.points[i];
-        const p1 = line.points[i + 1];
-        const seg: CohortSegment = {
-          x1: p0.x,
-          y1: p0.y,
-          x2: p1.x,
-          y2: p1.y,
-          heavy: line.heavy,
-          birthYear: line.birthYear,
-        };
-        const bucket = cohortSegByQuad.get(key);
-        if (bucket) {
-          bucket.push(seg);
-        } else {
-          cohortSegByQuad.set(key, [seg]);
-        }
-      }
-    }
-    const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
-    const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
-    const contourPolylines2D = buildValueContours2D(
-      stereoContourRuns,
-      projectedSurface,
-      surfacePoints,
-      ages,
-      years,
-      rows,
-      cols,
-      zScale,
-      frame,
-      projection
-    );
-    const valueSegByQuad = new Map<string, ValueSegment[]>();
-    contourPolylines2D.forEach((iso, isoIndex) => {
-      const segments = segmentizeContourPolyline(
-        iso.level,
-        iso.points,
-        iso.data,
+      const yearLines = buildYearLines(projectedSurface, years, rows, cols);
+      const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
+      const cohortLines = buildCohortLines(
+        swedenRows,
+        projectedSurface,
         years,
         ages,
-        iso.runId ?? isoIndex,
-        { splitByAgeLines: false }
+        rows,
+        cols
       );
-      for (const seg of segments) {
-        const { cellKey } = seg;
-        const bucket = valueSegByQuad.get(cellKey);
-        const { cellKey: _cellKey, ...rest } = seg;
-        if (bucket) {
-          bucket.push(rest);
-        } else {
-          valueSegByQuad.set(cellKey, [rest]);
+      const maxZByCol = new Array(cols).fill(-Infinity);
+      const birthZByCol = new Array(cols).fill(-Infinity);
+      for (let col = 0; col < cols; col++) {
+        for (let row = 0; row < rows; row++) {
+          const idx = row * cols + col;
+          const z = surfacePoints[idx]?.z ?? -Infinity;
+          if (z > maxZByCol[col]) {
+            maxZByCol[col] = z;
+          }
+          if (row === 0) {
+            birthZByCol[col] = z;
+          }
         }
       }
-    });
-    const isotonicSegByQuad = new Map<string, IsotonicSegment[]>();
-    if (isotonicRows.length > 0) {
-      const survivorsByYear = new Map<number, Map<number, number>>();
-      for (const row of swedenRows) {
-        const bucket = survivorsByYear.get(row.year);
-        if (bucket) {
-          bucket.set(row.age, row.survivors);
-        } else {
-          survivorsByYear.set(row.year, new Map([[row.age, row.survivors]]));
+      const yearSegByQuad = new Map<string, YearSegment[]>();
+      for (const line of yearLines) {
+        const col = years.indexOf(line.year);
+        if (col === -1) continue;
+        const qc = Math.min(col, cols - 2);
+        for (let row = 0; row < rows - 1; row++) {
+          const p0 = line.points[row];
+          const p1 = line.points[row + 1];
+          if (!p0 || !p1) continue;
+          const key = `${row}-${qc}`;
+          const seg: YearSegment = {
+            x1: p0.x,
+            y1: p0.y,
+            x2: p1.x,
+            y2: p1.y,
+            heavy: line.heavy,
+            year: line.year,
+          };
+          const bucket = yearSegByQuad.get(key);
+          if (bucket) {
+            bucket.push(seg);
+          } else {
+            yearSegByQuad.set(key, [seg]);
+          }
         }
       }
-      const agesSorted = [...ages].sort((a, b) => a - b);
-      const interpSurvivors = (year: number, age: number): number | null => {
-        const yearMap = survivorsByYear.get(year);
-        if (!yearMap) return null;
-        if (yearMap.has(age)) return yearMap.get(age) ?? null;
-        let idx = agesSorted.findIndex((a) => a > age);
-        if (idx <= 0) return yearMap.get(agesSorted[0]) ?? null;
-        if (idx < 0) idx = agesSorted.length;
-        if (idx >= agesSorted.length) {
-          return yearMap.get(agesSorted[agesSorted.length - 1]) ?? null;
+      const ageSegByQuad = new Map<string, AgeSegment[]>();
+      for (const line of ageLines) {
+        const row = ages.indexOf(line.age);
+        if (row < 0) continue;
+        const qr = Math.min(row, rows - 2);
+        for (let col = 0; col < cols - 1; col++) {
+          const p0 = line.points[col];
+          const p1 = line.points[col + 1];
+          if (!p0 || !p1) continue;
+          let visible: boolean | undefined;
+          if (line.age === 0) {
+            const isSkyline = (c: number) =>
+              birthZByCol[c] >= maxZByCol[c] - BIRTHS_SKYLINE_EPS;
+            visible = isSkyline(col) || isSkyline(col + 1);
+          }
+          const key = `${qr}-${col}`;
+          const seg: AgeSegment = {
+            x1: p0.x,
+            y1: p0.y,
+            x2: p1.x,
+            y2: p1.y,
+            heavy: line.heavy,
+            age: line.age,
+            visible,
+          };
+          const bucket = ageSegByQuad.get(key);
+          if (bucket) {
+            bucket.push(seg);
+          } else {
+            ageSegByQuad.set(key, [seg]);
+          }
         }
-        const a0 = agesSorted[idx - 1];
-        const a1 = agesSorted[idx];
-        const v0 = yearMap.get(a0);
-        const v1 = yearMap.get(a1);
-        if (v0 == null || v1 == null) return null;
-        const t = (age - a0) / (a1 - a0);
-        return v0 + (v1 - v0) * t;
-      };
-      const quantiles: (25 | 50 | 75)[] = [25, 50, 75];
-      for (const q of quantiles) {
-        const data = isotonicRows
-          .map((row) => ({
-            year: row.year,
-            age: q === 25 ? row.q25_age : q === 50 ? row.q50_age : row.q75_age,
-            pop:
-              interpSurvivors(
-                row.year,
-                q === 25
-                  ? row.q25_age
-                  : q === 50
-                    ? row.q50_age
-                    : row.q75_age
-              ) ?? 0,
-          }))
-          .filter(
-            (row) =>
-              Number.isFinite(row.year) &&
-              Number.isFinite(row.age) &&
-              Number.isFinite(row.pop)
-          );
-        if (data.length < 2) continue;
-        const points = data.map((row) =>
-          projectIso(frame.point(row.year, row.age, row.pop), projection)
-        );
+      }
+      const cohortSegByQuad = new Map<string, CohortSegment[]>();
+      for (const line of cohortLines) {
+        if (!line.indices || line.indices.length !== line.points.length) continue;
+        for (let i = 0; i < line.points.length - 1; i++) {
+          const idx0 = line.indices[i];
+          const idx1 = line.indices[i + 1];
+          const r0 = Math.floor(idx0 / cols);
+          const c0 = idx0 % cols;
+          const r1 = Math.floor(idx1 / cols);
+          const c1 = idx1 % cols;
+          const qr = Math.min(r0, r1);
+          const qc = Math.min(c0, c1);
+          const key = `${qr}-${qc}`;
+          const p0 = line.points[i];
+          const p1 = line.points[i + 1];
+          const seg: CohortSegment = {
+            x1: p0.x,
+            y1: p0.y,
+            x2: p1.x,
+            y2: p1.y,
+            heavy: line.heavy,
+            birthYear: line.birthYear,
+          };
+          const bucket = cohortSegByQuad.get(key);
+          if (bucket) {
+            bucket.push(seg);
+          } else {
+            cohortSegByQuad.set(key, [seg]);
+          }
+        }
+      }
+      const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
+      const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
+      const contourPolylines2D = buildValueContours2D(
+        stereoContourRuns,
+        projectedSurface,
+        surfacePoints,
+        ages,
+        years,
+        rows,
+        cols,
+        zScale,
+        frame,
+        projection
+      );
+      const valueSegByQuad = new Map<string, ValueSegment[]>();
+      contourPolylines2D.forEach((iso, isoIndex) => {
         const segments = segmentizeContourPolyline(
-          q,
-          points,
-          data.map((row) => ({ year: row.year, age: row.age })),
+          iso.level,
+          iso.points,
+          iso.data,
           years,
           ages,
-          q
+          iso.runId ?? isoIndex,
+          { splitByAgeLines: false }
         );
         for (const seg of segments) {
           const { cellKey } = seg;
-          const bucket = isotonicSegByQuad.get(cellKey);
-          const isoSeg: IsotonicSegment = {
-            x1: seg.x1,
-            y1: seg.y1,
-            x2: seg.x2,
-            y2: seg.y2,
-            quantile: q,
-          };
+          const bucket = valueSegByQuad.get(cellKey);
+          const { cellKey: _cellKey, ...rest } = seg;
           if (bucket) {
-            bucket.push(isoSeg);
+            bucket.push(rest);
           } else {
-            isotonicSegByQuad.set(cellKey, [isoSeg]);
+            valueSegByQuad.set(cellKey, [rest]);
+          }
+        }
+      });
+      const isotonicSegByQuad = new Map<string, IsotonicSegment[]>();
+      if (isotonicRows.length > 0) {
+        const survivorsByYear = new Map<number, Map<number, number>>();
+        for (const row of swedenRows) {
+          const bucket = survivorsByYear.get(row.year);
+          if (bucket) {
+            bucket.set(row.age, row.survivors);
+          } else {
+            survivorsByYear.set(row.year, new Map([[row.age, row.survivors]]));
+          }
+        }
+        const agesSorted = [...ages].sort((a, b) => a - b);
+        const interpSurvivors = (year: number, age: number): number | null => {
+          const yearMap = survivorsByYear.get(year);
+          if (!yearMap) return null;
+          if (yearMap.has(age)) return yearMap.get(age) ?? null;
+          let idx = agesSorted.findIndex((a) => a > age);
+          if (idx <= 0) return yearMap.get(agesSorted[0]) ?? null;
+          if (idx < 0) idx = agesSorted.length;
+          if (idx >= agesSorted.length) {
+            return yearMap.get(agesSorted[agesSorted.length - 1]) ?? null;
+          }
+          const a0 = agesSorted[idx - 1];
+          const a1 = agesSorted[idx];
+          const v0 = yearMap.get(a0);
+          const v1 = yearMap.get(a1);
+          if (v0 == null || v1 == null) return null;
+          const t = (age - a0) / (a1 - a0);
+          return v0 + (v1 - v0) * t;
+        };
+        const quantiles: (25 | 50 | 75)[] = [25, 50, 75];
+        for (const q of quantiles) {
+          const data = isotonicRows
+            .map((row) => ({
+              year: row.year,
+              age: q === 25 ? row.q25_age : q === 50 ? row.q50_age : row.q75_age,
+              pop:
+                interpSurvivors(
+                  row.year,
+                  q === 25
+                    ? row.q25_age
+                    : q === 50
+                      ? row.q50_age
+                      : row.q75_age
+                ) ?? 0,
+            }))
+            .filter(
+              (row) =>
+                Number.isFinite(row.year) &&
+                Number.isFinite(row.age) &&
+                Number.isFinite(row.pop)
+            );
+          if (data.length < 2) continue;
+          const points = data.map((row) =>
+            projectIso(frame.point(row.year, row.age, row.pop), projection)
+          );
+          const segments = segmentizeContourPolyline(
+            q,
+            points,
+            data.map((row) => ({ year: row.year, age: row.age })),
+            years,
+            ages,
+            q
+          );
+          for (const seg of segments) {
+            const { cellKey } = seg;
+            const bucket = isotonicSegByQuad.get(cellKey);
+            const isoSeg: IsotonicSegment = {
+              x1: seg.x1,
+              y1: seg.y1,
+              x2: seg.x2,
+              y2: seg.y2,
+              quantile: q,
+            };
+            if (bucket) {
+              bucket.push(isoSeg);
+            } else {
+              isotonicSegByQuad.set(cellKey, [isoSeg]);
+            }
           }
         }
       }
-    }
-    return {
-      surfacePoints,
-      rows,
-      cols,
-      years,
-      ages,
-      maxSurvivors,
-      zScale,
-      frame,
-      minYearExt,
-      maxYearExt,
-      projectedSurface,
-      floorPoints,
-      silhouettePts,
-      quads,
-      triangles,
-      cells,
-      yearLines,
-      ageLines,
-      cohortLines,
-      yearSegByQuad,
-      ageSegByQuad,
-      cohortSegByQuad,
-      valueSegByQuad,
-      isotonicSegByQuad,
-      contourPolylines2D,
-      maxZ,
-    };
-  }, [projection, swedenRows, stereoContourRuns, isotonicRows]);
+      return {
+        surfacePoints,
+        rows,
+        cols,
+        years,
+        ages,
+        maxSurvivors,
+        zScale,
+        frame,
+        minYearExt,
+        maxYearExt,
+        projectedSurface,
+        floorPoints,
+        silhouettePts,
+        quads,
+        triangles,
+        cells,
+        yearLines,
+        ageLines,
+        cohortLines,
+        yearSegByQuad,
+        ageSegByQuad,
+        cohortSegByQuad,
+        valueSegByQuad,
+        isotonicSegByQuad,
+        contourPolylines2D,
+        maxZ,
+      };
+    },
+    [swedenRows, stereoContourRuns, isotonicRows, maxHeight]
+  );
+  const model = useMemo(() => buildModel(projection), [buildModel, projection]);
+  const reverseProjection = useMemo(
+    () => ({
+      ...projection,
+      basis: {
+        ...projection.basis,
+        basisX: {
+          x: -projection.basis.basisX.x,
+          y: -projection.basis.basisX.y,
+        },
+        basisY: {
+          x: -projection.basis.basisY.x,
+          y: -projection.basis.basisY.y,
+        },
+      },
+    }),
+    [projection]
+  );
+  const reverseModel = useMemo(
+    () => buildModel(reverseProjection, { depthSortSign: -1, cullSign: -1 }),
+    [buildModel, reverseProjection]
+  );
   useEffect(() => {
     if (isotonicDebugLogged) return;
     if (!isUsaDataset || isotonicRows.length === 0) return;
@@ -1826,7 +1861,7 @@ export default function PlateViz({
     };
   }, [model.contourPolylines2D, model.frame, projection, stereoContourRuns]);
 
-  const frontWall = useMemo(() => {
+  const age100Wall = useMemo(() => {
     const frontAge = model.ages[model.ages.length - 1];
     const topLine = model.ageLines.find((line) => line.age === frontAge);
     if (!topLine || topLine.points.length < 2) return null;
@@ -1836,6 +1871,106 @@ export default function PlateViz({
     const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
     return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
   }, [model.ageLines, model.ages, model.frame, model.years, projection]);
+  const reverseFrontWall = useMemo(() => {
+    const frontAge = reverseModel.ages[reverseModel.ages.length - 1];
+    const topLine = reverseModel.ageLines.find((line) => line.age === frontAge);
+    if (!topLine || topLine.points.length < 2) return null;
+    const bottomPoints = reverseModel.years.map((year) =>
+      projectIso(reverseModel.frame.point(year, frontAge, 0), reverseProjection)
+    );
+    const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
+    return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
+  }, [
+    reverseModel.ageLines,
+    reverseModel.ages,
+    reverseModel.frame,
+    reverseModel.years,
+    reverseProjection,
+  ]);
+  const reverseAge0Wall = useMemo(() => {
+    const backAge = reverseModel.ages[0];
+    const topLine = reverseModel.ageLines.find((line) => line.age === backAge);
+    if (!topLine || topLine.points.length < 2) return null;
+    const yearStart = reverseModel.frame.minYear;
+    const yearEnd = reverseModel.frame.maxYear;
+    const bottomPoints = [
+      projectIso(reverseModel.frame.point(yearStart, backAge, 0), reverseProjection),
+      projectIso(reverseModel.frame.point(yearEnd, backAge, 0), reverseProjection),
+    ];
+    const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
+    return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
+  }, [
+    reverseModel.ageLines,
+    reverseModel.ages,
+    reverseModel.frame,
+    reverseProjection,
+  ]);
+  const reverseAge0WallClipId = "reverse-age0-wall-clip";
+  const reverseAge0WallYearLines = useMemo(() => {
+    const backAge = reverseModel.ages[0];
+    const yearBase = reverseModel.years[0] ?? reverseModel.frame.minYear;
+    return reverseModel.years.map((year) => {
+      const start = projectIso(
+        reverseModel.frame.point(year, backAge, 0),
+        reverseProjection
+      );
+      const end = projectIso(
+        reverseModel.frame.point(year, backAge, reverseModel.maxSurvivors),
+        reverseProjection
+      );
+      const heavy =
+        vizStyle.years.heavyStep > 0
+          ? (year - yearBase) % vizStyle.years.heavyStep === 0
+          : year === yearBase;
+      return { year, start, end, heavy };
+    });
+  }, [
+    reverseModel.ages,
+    reverseModel.years,
+    reverseModel.frame,
+    reverseModel.maxSurvivors,
+    reverseProjection,
+  ]);
+  const reverseAge0WallValueLines = useMemo(() => {
+    const backAge = reverseModel.ages[0];
+    const yearStart = reverseModel.frame.minYear;
+    const yearEnd = reverseModel.frame.maxYear;
+    const levels: {
+      level: number;
+      start: Point2D;
+      end: Point2D;
+      heavy: boolean;
+    }[] = [];
+    for (
+      let level = 0;
+      level <= reverseModel.maxSurvivors;
+      level += activeWall2025MinorStep
+    ) {
+      const start = projectIso(
+        reverseModel.frame.point(yearStart, backAge, level),
+        reverseProjection
+      );
+      const end = projectIso(
+        reverseModel.frame.point(yearEnd, backAge, level),
+        reverseProjection
+      );
+      const heavy =
+        activeValuesHeavyStep > 0 ? level % activeValuesHeavyStep === 0 : level === 0;
+      levels.push({ level, start, end, heavy });
+    }
+    return levels;
+  }, [
+    reverseModel.ages,
+    reverseModel.frame,
+    reverseModel.maxSurvivors,
+    reverseProjection,
+    activeWall2025MinorStep,
+    activeValuesHeavyStep,
+  ]);
+  const reverseAge0WallTopLine = useMemo(
+    () => reverseModel.ageLines.find((line) => line.age === reverseModel.ages[0]),
+    [reverseModel.ageLines, reverseModel.ages]
+  );
   if (DEBUG_CONTOUR_PROJ && debugContourOverlay && !contourDebugLogged) {
     contourDebugLogged = true;
     // eslint-disable-next-line no-console
@@ -1860,6 +1995,14 @@ export default function PlateViz({
       HEIGHT
     );
   }, [model.projectedSurface, model.floorPoints, WIDTH, HEIGHT]);
+  const { offsetX: reverseOffsetX, offsetY: reverseOffsetY } = useMemo(() => {
+    return computeAutoCenterOffset(
+      reverseModel.projectedSurface,
+      reverseModel.floorPoints,
+      WIDTH,
+      HEIGHT
+    );
+  }, [reverseModel.projectedSurface, reverseModel.floorPoints, WIDTH, HEIGHT]);
   const maxZ = model.maxZ;
   const shadingConfig = vizStyle.shading;
   const lightDir = normalize3(shadingConfig.lightDir);
@@ -1901,7 +2044,7 @@ export default function PlateViz({
     projectIso(model.frame.point(model.maxYearExt, 0, 0), projection),
     projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
   ];
-  const backWallFramePoints = [
+  const age0WallFramePoints = [
     projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
     projectIso(model.frame.point(model.maxYearExt, 0, 0), projection),
     projectIso(
@@ -1917,10 +2060,41 @@ export default function PlateViz({
   const floorFrameString = floorFramePoints
     .map((p) => `${p.x},${p.y}`)
     .join(" ");
-  const backWallTopLeft = backWallFramePoints[3];
+  const reverseFloorFrameString = useMemo(() => {
+    const points = [
+      projectIso(
+        reverseModel.frame.point(reverseModel.minYearExt, 0, 0),
+        reverseProjection
+      ),
+      projectIso(
+        reverseModel.frame.point(reverseModel.minYearExt, FRAME_MAX_AGE, 0),
+        reverseProjection
+      ),
+      projectIso(
+        reverseModel.frame.point(reverseModel.maxYearExt, FRAME_MAX_AGE, 0),
+        reverseProjection
+      ),
+      projectIso(
+        reverseModel.frame.point(reverseModel.maxYearExt, 0, 0),
+        reverseProjection
+      ),
+      projectIso(
+        reverseModel.frame.point(reverseModel.minYearExt, 0, 0),
+        reverseProjection
+      ),
+    ];
+    return points.map((p) => `${p.x},${p.y}`).join(" ");
+  }, [
+    reverseModel.frame,
+    reverseModel.minYearExt,
+    reverseModel.maxYearExt,
+    reverseProjection,
+    FRAME_MAX_AGE,
+  ]);
+  const age0WallTopLeft = age0WallFramePoints[3];
   const titlePos = {
-    x: backWallTopLeft.x - TITLE_BLOCK_WIDTH * 0.5,
-    y: backWallTopLeft.y - TITLE_BLOCK_HEIGHT - 12,
+    x: age0WallTopLeft.x - TITLE_BLOCK_WIDTH * 0.5,
+    y: age0WallTopLeft.y - TITLE_BLOCK_HEIGHT - 12,
   };
   const handleMouseMove = (event: ReactMouseEvent<SVGSVGElement>) => {
     if (!svgRef.current || model.silhouettePts.length === 0) {
@@ -2055,7 +2229,7 @@ export default function PlateViz({
   const bornEnd = hover ? hover.year - hover.age : 0;
   const bornStart = hover ? Math.max(0, bornEnd - 4) : 0;
   const bornLineText = hover ? `born ${bornStart} to ${bornEnd}` : "";
-  const backWallStyle = {
+  const age0WallIsolineStyle = {
     stroke: vizStyle.values.stroke,
     thinWidth: vizStyle.values.thinWidth,
     thickWidth: vizStyle.values.thickWidth,
@@ -2071,7 +2245,7 @@ export default function PlateViz({
     stroke: vizStyle.ages.stroke,
     strokeWidth: vizStyle.ages.thickWidth,
   };
-  const rightWallStyle = {
+  const wall2025Style = {
     wallFill: vizStyle.wall.fill,
     wallStroke: vizStyle.wall.stroke,
     ageStroke: vizStyle.ages.stroke,
@@ -2102,20 +2276,21 @@ export default function PlateViz({
   };
   const isotonicStyle = {
     stroke: TOOLTIP_STYLE.accent,
-    thinWidth: vizStyle.years.thickWidth,
+    thinWidth: vizStyle.years.thinWidth,
     thickWidth: vizStyle.years.thickWidth,
     thinOpacity: 1,
-    thickOpacity: 1,
+    thickOpacity: .85,
   };
   const titleProps = {
-    x: titlePos.x + 125,
-    y: titlePos.y + 130,
+    x: titlePos.x + 125 + (isUsaDataset ? -90 : 0),
+    y: titlePos.y + 130 + (isUsaDataset ? 10 : 0),
     style: { text: "#282828ff" },
     legend: {
       ages: vizStyle.ages.stroke,
       values: vizStyle.values.stroke,
       cohorts: vizStyle.cohorts.stroke,
       years: vizStyle.years.stroke,
+      quadrants: isUsaDataset ? isotonicStyle.stroke : undefined,
       thin: LINE_THIN_WIDTH,
       thick: LINE_THICK_WIDTH,
     },
@@ -2124,14 +2299,38 @@ export default function PlateViz({
   const activeAxisLabelLayout = isUsaDataset
     ? { ...AXIS_LABEL_LAYOUT, side: "right" as const }
     : AXIS_LABEL_LAYOUT;
+  const reverseAxisLabelLayout = useMemo(
+    () => ({ ...activeAxisLabelLayout, side: "left" as const }),
+    [activeAxisLabelLayout]
+  );
+  const REVERSE_YEAR_LABEL_X_OFFSET = -22;
+  const REVERSE_AGE_LEADER_SCALE = 1.5;
+  const REVERSE_AGE_LEADER_OFFSET = 4;
+  const REVERSE_VALUE_LEADER_SCALE = 1.5;
+  const REVERSE_VALUE_LEADER_OFFSET = 4;
   const yearMax = model.frame.maxYear;
   const yearMaxLine = model.yearLines.find((line) => line.year === yearMax);
   const yearMaxPointsStr = yearMaxLine
     ? yearMaxLine.points.map((p) => `${p.x},${p.y}`).join(" ")
     : "";
   const colMax = model.cols - 1;
-  const rightWallTopEdge2D = model.ages.map(
+  const wall2025TopEdge2D = model.ages.map(
     (_age, row) => model.projectedSurface[row * model.cols + colMax]
+  );
+  const reverseColMin = 0;
+  const wall1900TopEdge2D = reverseModel.ages.map(
+    (_age, row) =>
+      reverseModel.projectedSurface[row * reverseModel.cols + reverseColMin]
+  );
+  const reverseWall1900Style = useMemo(
+    () => ({
+      ...wall2025Style,
+      ageThinOpacity: Math.min(1, wall2025Style.ageThinOpacity * 2),
+      ageThickOpacity: Math.min(1, wall2025Style.ageThickOpacity * 1.2),
+      valueThinOpacity: Math.min(1, wall2025Style.valueThinOpacity * 1.6),
+      valueThickOpacity: Math.min(1, wall2025Style.valueThickOpacity * 1.2),
+    }),
+    [wall2025Style]
   );
 
   return (
@@ -2202,15 +2401,15 @@ export default function PlateViz({
                 maxYearExt={model.maxYearExt}
                 extendLeftYears={EXTEND_LEFT_YEARS}
                 extendRightYears={EXTEND_RIGHT_YEARS}
-                floorFrameString={floorFrameString}
+                floorFrameString={reverseFloorFrameString}
                 floorAlpha={floorAlpha}
                 shadingInkColor={shadingConfig.inkColor}
-                backWallStyle={backWallStyle}
-                backwallFullLevels={valueLevelConfig.backwallFull}
-                backwallRightLevels={valueLevelConfig.backwallRightOnly}
+                age0WallIsolineStyle={age0WallIsolineStyle}
+                age0WallFullLevels={valueLevelConfig.age0WallFull}
+                age0Wall2025OnlyLevels={valueLevelConfig.age0Wall2025Only}
                 floorStyle={floorStyle}
                 floorAgeStyle={floorAgeStyle}
-                rightWallStyle={rightWallStyle}
+                wall2025Style={wall2025Style}
                 shadingConfig={shadingConfig}
                 surfacePoints={model.surfacePoints}
                 rows={model.rows}
@@ -2218,19 +2417,19 @@ export default function PlateViz({
                 ages={model.ages}
                 maxSurvivors={model.maxSurvivors}
                 floorZ={FLOOR_DEPTH}
-                valueStep={activeRightWallValueStep}
-                valueMinorStep={activeRightWallMinorStep}
-                showRightWall={false}
+                valueStep={activeWall2025ValueStep}
+                valueMinorStep={activeWall2025MinorStep}
+                showWall2025={false}
               />
             )}
             {layersEnabled.surface && (
               <>
-                {frontWall && (
+                {age100Wall && (
                   <polygon
-                    points={frontWall}
-                    fill={"#b3a19155"}//{rightWallStyle.wallFill ?? vizStyle.wall.fill}
+                    points={age100Wall}
+                    fill={"#b3a19155"}//{wall2025Style.wallFill ?? vizStyle.wall.fill}
                     stroke="none"
-                    id="layer-front-wall"
+                    id="layer-age100-wall"
                   />
                 )}
                 <g id="surface-clipped">
@@ -2260,21 +2459,21 @@ export default function PlateViz({
                 </g>
               </>
             )}
-            {FEATURES.rightWall && (
-              <RightWall
+            {FEATURES.wall2025 && (
+              <YearWall
                 surfacePoints={model.surfacePoints}
-                topEdge2D={rightWallTopEdge2D}
+                topEdge2D={wall2025TopEdge2D}
                 rows={model.rows}
                 cols={model.cols}
                 projection={projection}
                 floorZ={FLOOR_DEPTH}
                 ages={model.ages}
                 maxSurvivors={model.maxSurvivors}
-                valueStep={activeRightWallValueStep}
-                valueMinorStep={activeRightWallMinorStep}
+                valueStep={activeWall2025ValueStep}
+                valueMinorStep={activeWall2025MinorStep}
                 frame={model.frame}
                 shading={shadingConfig}
-                style={rightWallStyle}
+                style={wall2025Style}
               />
             )}
             {FEATURES.labels && layersEnabled.labels && (
@@ -2299,6 +2498,7 @@ export default function PlateViz({
                 valueLabelFormat={isUsaDataset ? "millions" : undefined}
                 age100Text={isUsaDataset ? "100+ years old" : undefined}
                 titleProps={titleProps}
+                titleVariant={isUsaDataset ? "usa" : undefined}
                 topValueByYear={topValueByYear}
                 yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
               />
@@ -2455,7 +2655,8 @@ export default function PlateViz({
                 isotonicRows={isotonicRows}
                 isotonicStyle={{
                   stroke: isotonicStyle.stroke,
-                  width: isotonicStyle.thickWidth,
+                  thinWidth: isotonicStyle.thinWidth,
+                  thickWidth: isotonicStyle.thickWidth,
                   opacity: isotonicStyle.thickOpacity,
                 }}
                 padding={{
@@ -2562,6 +2763,301 @@ export default function PlateViz({
             </>
           );
         })()}
+      </div>
+      <div
+        style={{
+          marginTop: 24,
+          position: "relative",
+          width: WIDTH,
+          height: HEIGHT,
+        }}
+      >
+        <svg
+          width={WIDTH}
+          height={HEIGHT}
+          style={{
+            border: `1px solid ${vizStyle.svg.border}`,
+            background: vizStyle.svg.background,
+            display: "block",
+          }}
+        >
+          <g transform={`translate(${reverseOffsetX}, ${reverseOffsetY})`}>
+            {layersEnabled.architecture && (
+              <ArchitectureLayer
+                frame={reverseModel.frame}
+                projection={reverseProjection}
+                minYearExt={reverseModel.minYearExt}
+                maxYearExt={reverseModel.maxYearExt}
+                extendLeftYears={EXTEND_LEFT_YEARS}
+                extendRightYears={EXTEND_RIGHT_YEARS}
+                floorFrameString={reverseFloorFrameString}
+                floorAlpha={floorAlpha}
+                shadingInkColor={shadingConfig.inkColor}
+                age0WallIsolineStyle={age0WallIsolineStyle}
+                age0WallFullLevels={[]}
+                age0Wall2025OnlyLevels={[]}
+                floorStyle={floorStyle}
+                floorAgeStyle={floorAgeStyle}
+                wall2025Style={wall2025Style}
+                shadingConfig={shadingConfig}
+                surfacePoints={reverseModel.surfacePoints}
+                rows={reverseModel.rows}
+                cols={reverseModel.cols}
+                ages={reverseModel.ages}
+                maxSurvivors={reverseModel.maxSurvivors}
+                floorZ={FLOOR_DEPTH}
+                valueStep={activeWall2025ValueStep}
+                valueMinorStep={activeWall2025MinorStep}
+                showWall2025={false}
+              />
+            )}
+            {layersEnabled.surface && (
+              <>
+                <g>
+                  <SurfaceLayer
+                    quads={reverseModel.quads}
+                    cells={reverseModel.cells}
+                    globalTriSort={globalTriSort}
+                    depthSortSign={-1}
+                    surfaceStyle={{
+                      fill: vizStyle.surface.fill,
+                      stroke: vizStyle.surface.stroke,
+                      strokeWidth: vizStyle.surface.strokeWidth,
+                    }}
+                    shading={shadingConfig}
+                    lightDir={lightDir}
+                    drawSegments={reverseModel.cells.length > 0}
+                    yearSegByCell={reverseModel.yearSegByQuad}
+                    yearStyle={vizStyle.years}
+                    ageSegByCell={reverseModel.ageSegByQuad}
+                    ageStyle={vizStyle.ages}
+                    valueSegByCell={reverseModel.valueSegByQuad}
+                    valueStyle={linesVizStyle.values}
+                    cohortSegByCell={reverseModel.cohortSegByQuad}
+                    cohortStyle={vizStyle.cohorts}
+                    isotonicSegByCell={reverseModel.isotonicSegByQuad}
+                    isotonicStyle={isotonicStyle}
+                  />
+                </g>
+              </>
+            )}
+            {reverseAge0Wall && (
+              <>
+                <defs>
+                  <clipPath
+                    id={reverseAge0WallClipId}
+                    clipPathUnits="userSpaceOnUse"
+                  >
+                    <polygon points={reverseAge0Wall} />
+                  </clipPath>
+                </defs>
+                <polygon
+                  id="layer-reverse-age0-wall"
+                  points={reverseAge0Wall}
+                  fill="#f5f3e5"
+                  stroke="none"
+                />
+                <g clipPath={`url(#${reverseAge0WallClipId})`}>
+                  {reverseAge0WallYearLines.map((line) => (
+                    <line
+                      key={`rev-age0-year-${line.year}`}
+                      x1={line.start.x}
+                      y1={line.start.y}
+                      x2={line.end.x}
+                      y2={line.end.y}
+                      stroke={vizStyle.years.stroke}
+                      strokeWidth={
+                        line.heavy ? vizStyle.years.thickWidth : vizStyle.years.thinWidth
+                      }
+                      strokeOpacity={
+                        line.heavy ? vizStyle.years.thickOpacity : vizStyle.years.thinOpacity
+                      }
+                      strokeLinecap="round"
+                    />
+                  ))}
+                  {reverseAge0WallValueLines.map((line) => (
+                    <line
+                      key={`rev-age0-val-${line.level}`}
+                      x1={line.start.x}
+                      y1={line.start.y}
+                      x2={line.end.x}
+                      y2={line.end.y}
+                      stroke={vizStyle.values.stroke}
+                      strokeWidth={
+                        line.heavy ? vizStyle.values.thickWidth : vizStyle.values.thinWidth
+                      }
+                      strokeOpacity={
+                        line.heavy ? vizStyle.values.thickOpacity : vizStyle.values.thinOpacity
+                      }
+                      strokeLinecap="round"
+                    />
+                  ))}
+                </g>
+              </>
+            )}
+            {FEATURES.wall2025 && (
+              <YearWall
+                surfacePoints={reverseModel.surfacePoints}
+                topEdge2D={wall1900TopEdge2D}
+                wallYear={reverseModel.frame.minYear}
+                colIndex={0}
+                rows={reverseModel.rows}
+                cols={reverseModel.cols}
+                projection={reverseProjection}
+                floorZ={FLOOR_DEPTH}
+                ages={reverseModel.ages}
+                maxSurvivors={reverseModel.maxSurvivors}
+                valueStep={activeWall2025ValueStep}
+                valueMinorStep={activeWall2025MinorStep}
+                frame={reverseModel.frame}
+                shading={shadingConfig}
+                style={reverseWall1900Style}
+              />
+            )}
+            {reverseModel.yearLines.find(
+              (line) => line.year === reverseModel.frame.minYear
+            ) && (
+                <polyline
+                  points={reverseModel.yearLines
+                    .find((line) => line.year === reverseModel.frame.minYear)!
+                    .points.map((p) => `${p.x},${p.y}`)
+                    .join(" ")}
+                  fill="none"
+                  stroke={vizStyle.years.stroke}
+                  strokeWidth={vizStyle.years.thickWidth}
+                  strokeOpacity={vizStyle.years.thickOpacity}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+            {reverseAge0WallYearLines.find(
+              (line) => line.year === reverseModel.frame.maxYear
+            ) && reverseAge0WallTopLine && (
+                <line
+                  x1={
+                    reverseAge0WallYearLines.find(
+                      (line) => line.year === reverseModel.frame.maxYear
+                    )!.start.x
+                  }
+                  y1={
+                    reverseAge0WallYearLines.find(
+                      (line) => line.year === reverseModel.frame.maxYear
+                    )!.start.y
+                  }
+                  x2={
+                    reverseAge0WallTopLine.points[
+                      Math.max(
+                        0,
+                        reverseModel.years.indexOf(reverseModel.frame.maxYear)
+                      )
+                    ]?.x ?? reverseAge0WallYearLines.find(
+                      (line) => line.year === reverseModel.frame.maxYear
+                    )!.end.x
+                  }
+                  y2={
+                    reverseAge0WallTopLine.points[
+                      Math.max(
+                        0,
+                        reverseModel.years.indexOf(reverseModel.frame.maxYear)
+                      )
+                    ]?.y ?? reverseAge0WallYearLines.find(
+                      (line) => line.year === reverseModel.frame.maxYear
+                    )!.end.y
+                  }
+                  stroke={vizStyle.years.stroke}
+                  strokeWidth={vizStyle.years.thickWidth}
+                  strokeOpacity={vizStyle.years.thickOpacity}
+                  strokeLinecap="round"
+                />
+              )}
+            {reverseModel.ageLines.find(
+              (line) => line.age === reverseModel.ages[0]
+            ) && (
+                <polyline
+                  points={reverseModel.ageLines
+                    .find((line) => line.age === reverseModel.ages[0])!
+                    .points.map((p) => `${p.x},${p.y}`)
+                    .join(" ")}
+                  fill="none"
+                  stroke={vizStyle.ages.stroke}
+                  strokeWidth={vizStyle.ages.thickWidth}
+                  strokeOpacity={vizStyle.ages.thickOpacity}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+            {reverseAge0WallValueLines.find((line) => line.level === 0) && (
+              <line
+                x1={
+                  reverseAge0WallValueLines.find(
+                    (line) => line.level === 0
+                  )!.start.x
+                }
+                y1={
+                  reverseAge0WallValueLines.find(
+                    (line) => line.level === 0
+                  )!.start.y
+                }
+                x2={
+                  reverseAge0WallValueLines.find(
+                    (line) => line.level === 0
+                  )!.end.x
+                }
+                y2={
+                  reverseAge0WallValueLines.find(
+                    (line) => line.level === 0
+                  )!.end.y
+                }
+                stroke={vizStyle.values.stroke}
+                strokeWidth={vizStyle.values.thickWidth}
+                strokeOpacity={vizStyle.values.thickOpacity}
+                strokeLinecap="round"
+              />
+            )}
+            {FEATURES.labels && layersEnabled.labels && (
+              <LabelsLayer
+                frame={reverseModel.frame}
+                projection={reverseProjection}
+                years={reverseModel.years}
+                minYearExt={reverseModel.minYearExt}
+                maxYearExt={reverseModel.maxYearExt}
+                axisLabelBaseStyle={AXIS_LABEL_STYLE}
+                axisLabelLayout={reverseAxisLabelLayout}
+                vizStyle={{
+                  ages: { stroke: vizStyle.ages.stroke },
+                  values: { stroke: vizStyle.values.stroke },
+                  years: { stroke: vizStyle.years.stroke },
+                }}
+                valueLevels={{
+                  left: valueLevelConfig.left,
+                  right: valueLevelConfig.right,
+                }}
+                showTitle={false}
+                valueLabelFormat={isUsaDataset ? "millions" : undefined}
+                age100Text={isUsaDataset ? "100+ years old" : undefined}
+                ageLabelSideOverride="left"
+                ageLabelTextAnchorOverride="start"
+                ageLabelShowLeaders
+                ageLabelLeaderScale={REVERSE_AGE_LEADER_SCALE}
+                ageLabelLeaderOffset={REVERSE_AGE_LEADER_OFFSET}
+                valueLabelSideOverride="right"
+                valueLabelTextAnchorOverride="end"
+                valueLabelShowLeaders
+                valueLabelLeaderScale={REVERSE_VALUE_LEADER_SCALE}
+                valueLabelLeaderOffset={REVERSE_VALUE_LEADER_OFFSET}
+                valueLabelIncludeZero
+                yearBottomAngleDeg={270}
+                yearBottomYOffset={0}
+                yearBottomXOffset={REVERSE_YEAR_LABEL_X_OFFSET}
+                yearBottomAnchorAge={reverseModel.ages[0]}
+                titleProps={titleProps}
+                titleVariant={isUsaDataset ? "usa" : undefined}
+                topValueByYear={topValueByYear}
+                yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
+              />
+            )}
+          </g>
+        </svg>
       </div>
     </div>
   );
