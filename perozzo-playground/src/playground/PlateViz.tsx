@@ -3,7 +3,7 @@
  * Picks parameters, calls core functions, draws marks.
  * Keeps React focused on layout, not math.
  */
-import { useState, useRef, useMemo, useEffect, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import {
   floorPolygon,
@@ -28,6 +28,7 @@ import LabelsLayer from "./layers/LabelsLayer";
 import InteractionLayer from "./layers/InteractionLayer";
 import YearWall from "./layers/YearWall";
 import TopView from "./layers/TopView";
+import ReverseView from "./layers/reverse/ReverseView";
 
 import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import { makeFrame3D, type Frame3D } from "../core/frame3d";
@@ -83,9 +84,6 @@ const DEFAULT_VALUE_LEVELS = {
   age0WallFull: [0, 50_000, 100_000, 150_000],
   age0Wall2025Only: [200_000, 250_000],
 };
-const DEBUG_CONTOUR_PROJ = false;
-const DEBUG_CONTOUR_LEVEL = 10_000_000;
-let contourDebugLogged = false;
 const FEATURES = {
   labels: true,
   hover: true,
@@ -314,13 +312,6 @@ type ValueContour2D = {
   points: Point2D[];
   data: { year: number; age: number }[];
 };
-type KissPair = {
-  level: number;
-  age: number;
-  surface: Point2D;
-  wall: Point2D;
-  dist: number;
-};
 type CohortSegment = {
   x1: number;
   y1: number;
@@ -361,38 +352,7 @@ type IsotonicSegment = {
   quantile: 25 | 50 | 75;
 };
 
-type Vec3 = { x: number; y: number; z: number };
-let triCellHistLogged = false;
-let split4CountLogged = false;
-let isotonicDebugLogged = false;
-
 /* ---------- GEOMETRY / LAYER HELPERS ---------- */
-
-function sub3(a: Point3D, b: Point3D): Vec3 {
-  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
-}
-function cross3(u: Vec3, v: Vec3): Vec3 {
-  return {
-    x: u.y * v.z - u.z * v.y,
-    y: u.z * v.x - u.x * v.z,
-    z: u.x * v.y - u.y * v.x,
-  };
-}
-function norm3(v: Vec3): number {
-  return Math.hypot(v.x, v.y, v.z) || 1;
-}
-function normalizeV3(v: Vec3): Vec3 {
-  const n = norm3(v);
-  return { x: v.x / n, y: v.y / n, z: v.z / n };
-}
-function triNormal(a: Point3D, b: Point3D, c: Point3D): Vec3 {
-  const u = sub3(b, a);
-  const v = sub3(c, a);
-  return normalizeV3(cross3(u, v));
-}
-function dot3(a: Vec3, b: Vec3): number {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
 function triArea2(a: Point2D, b: Point2D, c: Point2D): number {
   return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
@@ -495,26 +455,6 @@ function distToSilhouette(p: Point2D, poly: Point2D[]): number {
     }
   }
   return minDist;
-}
-
-function findRowSegmentIndex(age: number, ages: number[]): number {
-  if (age < ages[0] || age > ages[ages.length - 1]) return -1;
-  for (let i = 0; i < ages.length - 1; i++) {
-    if (age >= ages[i] && age <= ages[i + 1]) {
-      return i;
-    }
-  }
-  return -1;
-}
-
-function findColSegmentIndex(year: number, years: number[]): number {
-  if (year < years[0] || year > years[years.length - 1]) return -1;
-  for (let i = 0; i < years.length - 1; i++) {
-    if (year >= years[i] && year <= years[i + 1]) {
-      return i;
-    }
-  }
-  return -1;
 }
 
 function buildQuads(
@@ -838,56 +778,6 @@ function flattenContourRuns(contours: ContourFile[]): ContourFile[] {
   return out;
 }
 
-function projectSurfaceYearAge(
-  year: number,
-  age: number,
-  projectedSurface: Point2D[],
-  ages: number[],
-  years: number[],
-  rows: number,
-  cols: number
-): Point2D | null {
-  if (
-    projectedSurface.length === 0 ||
-    year < years[0] ||
-    year > years[years.length - 1] ||
-    age < ages[0] ||
-    age > ages[ages.length - 1]
-  ) {
-    return null;
-  }
-
-  const colLeft = findColSegmentIndex(year, years);
-  const rowBelow = findRowSegmentIndex(age, ages);
-  if (colLeft < 0 || rowBelow < 0 || rowBelow >= rows - 1) return null;
-
-  const colRight = Math.min(colLeft + 1, cols - 1);
-  const rowAbove = Math.min(rowBelow + 1, rows - 1);
-
-  const y0 = years[colLeft];
-  const y1 = years[colRight];
-  const ty = y1 === y0 ? 0 : (year - y0) / (y1 - y0);
-
-  const age0 = ages[rowBelow];
-  const age1 = ages[rowAbove];
-  const ta = age1 === age0 ? 0 : (age - age0) / (age1 - age0);
-
-  const p00 = projectedSurface[rowBelow * cols + colLeft];
-  const p10 = projectedSurface[rowBelow * cols + colRight];
-  const p01 = projectedSurface[rowAbove * cols + colLeft];
-  const p11 = projectedSurface[rowAbove * cols + colRight];
-  if (!p00 || !p10 || !p01 || !p11) return null;
-
-  const q0x = p00.x + ty * (p10.x - p00.x);
-  const q0y = p00.y + ty * (p10.y - p00.y);
-  const q1x = p01.x + ty * (p11.x - p01.x);
-  const q1y = p01.y + ty * (p11.y - p01.y);
-
-  const x = q0x + ta * (q1x - q0x);
-  const y = q0y + ta * (q1y - q0y);
-  return { x, y };
-}
-
 function computeAutoCenterOffset(
   projectedSurface: Point2D[],
   floorPoints: Point2D[],
@@ -952,6 +842,8 @@ export default function PlateViz({
     screenX: number;
     screenY: number;
   }>(null);
+  const HOVER_HIGHLIGHT_MULT = 1;
+  const HOVER_DIM_MULT = 0.35;
   const globalTriSort = true;
   const [topShowYears, setTopShowYears] = useState<boolean>(true);
   const [topShowAges, setTopShowAges] = useState<boolean>(true);
@@ -960,8 +852,7 @@ export default function PlateViz({
   const [topShowContourCrossings, setTopShowContourCrossings] =
     useState<boolean>(false);
   const [topShowIsotonic, setTopShowIsotonic] = useState<boolean>(true);
-  const [topContourMode, setTopContourMode] =
-    useState<"raw" | "segmented">("raw");
+  const [topContourMode] = useState<"raw" | "segmented">("raw");
   const topViewSvgRef = useRef<SVGSVGElement | null>(null);
 
   const datasetTitleKey = title?.bigWord?.toUpperCase() ?? "";
@@ -974,35 +865,6 @@ export default function PlateViz({
   // camera / projection based on preset
   const swedenRows = useMemo(() => {
     const parsed = parseSwedenCsv(csvText);
-    if (isUsaDataset && parsed.length > 0) {
-      const years = Array.from(new Set(parsed.map((r) => r.year))).sort(
-        (a, b) => a - b
-      );
-      const ages = Array.from(new Set(parsed.map((r) => r.age))).sort(
-        (a, b) => a - b
-      );
-      const yearFirst = years[0];
-      const yearStepFirst =
-        years.length > 1 ? years[1] - years[0] : Number.NaN;
-      const yearLast = years[years.length - 1];
-      const ageStepFirst = ages.length > 1 ? ages[1] - ages[0] : Number.NaN;
-      const ageFirst = ages[0];
-      const ageLast = ages[ages.length - 1];
-      const uniqueYearSteps = new Set<number>();
-      for (let i = 1; i < years.length; i++) {
-        uniqueYearSteps.add(years[i] - years[i - 1]);
-      }
-      const uniqueAgeSteps = new Set<number>();
-      for (let i = 1; i < ages.length; i++) {
-        uniqueAgeSteps.add(ages[i] - ages[i - 1]);
-      }
-      let maxRow = parsed[0];
-      for (const row of parsed) {
-        if (row.survivors > maxRow.survivors) {
-          maxRow = row;
-        }
-      }
-    }
     return parsed;
   }, [csvText, isUsaDataset]);
   const isotonicRows = useMemo(() => {
@@ -1084,9 +946,15 @@ export default function PlateViz({
             run
           ): run is {
             level: number;
-            points: { year: number; age: number | null }[];
+            points: ContourPointFile[];
             runId?: number;
-          } => !!run.points && run.points.length > 0
+          } =>
+            Array.isArray(run.points) &&
+            run.points.length > 0 &&
+            run.points.every(
+              (point) =>
+                Number.isFinite(point.year) && Number.isFinite(point.age)
+            )
         )
         .map((run) => ({
           level: run.level,
@@ -1455,21 +1323,6 @@ export default function PlateViz({
           (a, b) => (a.depthKey - b.depthKey) * depthSortSign
         )
         : [];
-      if (!triCellHistLogged && cells.length > 0) {
-        triCellHistLogged = true;
-        const hist: Record<number, number> = {};
-        for (const cell of cells) {
-          const count = cell.tris.length;
-          hist[count] = (hist[count] ?? 0) + 1;
-        }
-        // eslint-disable-next-line no-console
-        console.log("[TRI_CELL_TRI_COUNT_HIST]", hist);
-      }
-      if (!split4CountLogged && TRI_RENDER.enabled && cells.length > 0) {
-        split4CountLogged = true;
-        // eslint-disable-next-line no-console
-        console.log("[TRI_SPLIT4_COUNT]", split4Count);
-      }
       const yearLines = buildYearLines(projectedSurface, years, rows, cols);
       const ageLines = buildAgeLines(projectedSurface, ages, rows, cols);
       const cohortLines = buildCohortLines(
@@ -1755,111 +1608,6 @@ export default function PlateViz({
     () => buildModel(reverseProjection, { depthSortSign: -1, cullSign: -1 }),
     [buildModel, reverseProjection]
   );
-  useEffect(() => {
-    if (isotonicDebugLogged) return;
-    if (!isUsaDataset || isotonicRows.length === 0) return;
-    isotonicDebugLogged = true;
-    const sampleYears = [1900, 1950, 2000, 2025];
-    const ages = model?.ages ?? [];
-    const years = model?.years ?? [];
-    const rows = isotonicRows.filter((row) =>
-      sampleYears.includes(row.year)
-    );
-    const findSurfaceZ = (year: number, age: number) => {
-      if (!years.length || !ages.length) return null;
-      const col = years.indexOf(year);
-      if (col < 0) return null;
-      let row = ages.findIndex((a) => a >= age);
-      if (row < 0) row = ages.length - 1;
-      row = Math.min(Math.max(row, 0), ages.length - 1);
-      const idx = row * years.length + col;
-      const p = model?.surfacePoints?.[idx];
-      return p ? p.z : null;
-    };
-    const format = (v: number | null) =>
-      v == null || !Number.isFinite(v) ? "n/a" : v.toFixed(3);
-    const out = rows.map((row) => ({
-      year: row.year,
-      q25: {
-        age: row.q25_age,
-        pop: row.q25_pop,
-        surfaceZ: format(findSurfaceZ(row.year, row.q25_age)),
-      },
-      q50: {
-        age: row.q50_age,
-        pop: row.q50_pop,
-        surfaceZ: format(findSurfaceZ(row.year, row.q50_age)),
-      },
-      q75: {
-        age: row.q75_age,
-        pop: row.q75_pop,
-        surfaceZ: format(findSurfaceZ(row.year, row.q75_age)),
-      },
-    }));
-    // eslint-disable-next-line no-console
-    console.log("[ISOTONIC DEBUG]", out);
-  }, [isUsaDataset, isotonicRows, model]);
-  const debugContourOverlay = useMemo(() => {
-    if (!DEBUG_CONTOUR_PROJ) return null;
-    const level = DEBUG_CONTOUR_LEVEL;
-    const rawRuns = model.contourPolylines2D
-      .filter((iso) => iso.level === level)
-      .map((iso) => iso.points);
-    const directRuns: Point2D[][] = [];
-    const rawWallDots: Point2D[] = [];
-    const directWallDots: Point2D[] = [];
-    const maxYear = model.frame.maxYear;
-    let maxDelta = 0;
-    let sumDelta = 0;
-    let count = 0;
-    for (const iso of model.contourPolylines2D) {
-      if (iso.level !== level) continue;
-      iso.data.forEach((d, i) => {
-        if (!Number.isFinite(d.year) || !Number.isFinite(d.age)) return;
-        const direct = projectIso(
-          model.frame.point(d.year, d.age, level),
-          projection
-        );
-        const surface = iso.points[i];
-        if (!surface) return;
-        const dx = direct.x - surface.x;
-        const dy = direct.y - surface.y;
-        const dist = Math.hypot(dx, dy);
-        if (dist > maxDelta) maxDelta = dist;
-        sumDelta += dist;
-        count += 1;
-        if (Math.abs(d.year - maxYear) < 1e-6) {
-          rawWallDots.push(surface);
-          directWallDots.push(direct);
-        }
-      });
-    }
-    for (const run of stereoContourRuns) {
-      if (run.level !== level || !run.points) continue;
-      const pts: Point2D[] = [];
-      for (const p of run.points) {
-        if (!Number.isFinite(p.year) || !Number.isFinite(p.age)) continue;
-        const pt = projectIso(
-          model.frame.point(p.year, p.age, level),
-          projection
-        );
-        pts.push(pt);
-      }
-      if (pts.length > 1) directRuns.push(pts);
-    }
-    return {
-      level,
-      rawRuns,
-      directRuns,
-      rawWallDots,
-      directWallDots,
-      stats: {
-        count,
-        maxDelta,
-        meanDelta: count > 0 ? sumDelta / count : 0,
-      },
-    };
-  }, [model.contourPolylines2D, model.frame, projection, stereoContourRuns]);
 
   const age100Wall = useMemo(() => {
     const frontAge = model.ages[model.ages.length - 1];
@@ -1871,22 +1619,6 @@ export default function PlateViz({
     const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
     return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
   }, [model.ageLines, model.ages, model.frame, model.years, projection]);
-  const reverseFrontWall = useMemo(() => {
-    const frontAge = reverseModel.ages[reverseModel.ages.length - 1];
-    const topLine = reverseModel.ageLines.find((line) => line.age === frontAge);
-    if (!topLine || topLine.points.length < 2) return null;
-    const bottomPoints = reverseModel.years.map((year) =>
-      projectIso(reverseModel.frame.point(year, frontAge, 0), reverseProjection)
-    );
-    const polygonPoints = [...topLine.points, ...bottomPoints.slice().reverse()];
-    return polygonPoints.map((p) => `${p.x},${p.y}`).join(" ");
-  }, [
-    reverseModel.ageLines,
-    reverseModel.ages,
-    reverseModel.frame,
-    reverseModel.years,
-    reverseProjection,
-  ]);
   const reverseAge0Wall = useMemo(() => {
     const backAge = reverseModel.ages[0];
     const topLine = reverseModel.ageLines.find((line) => line.age === backAge);
@@ -1971,14 +1703,6 @@ export default function PlateViz({
     () => reverseModel.ageLines.find((line) => line.age === reverseModel.ages[0]),
     [reverseModel.ageLines, reverseModel.ages]
   );
-  if (DEBUG_CONTOUR_PROJ && debugContourOverlay && !contourDebugLogged) {
-    contourDebugLogged = true;
-    // eslint-disable-next-line no-console
-    console.log("[CONTOUR_PROJ_DEBUG]", {
-      level: debugContourOverlay.level,
-      ...debugContourOverlay.stats,
-    });
-  }
   const layersEnabled = {
     architecture: true,
     surface: true,
@@ -2031,19 +1755,6 @@ export default function PlateViz({
       })
       : 0;
 
-  const floorFramePoints = [
-    projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
-    projectIso(
-      model.frame.point(model.minYearExt, FRAME_MAX_AGE, 0),
-      projection
-    ),
-    projectIso(
-      model.frame.point(model.maxYearExt, FRAME_MAX_AGE, 0),
-      projection
-    ),
-    projectIso(model.frame.point(model.maxYearExt, 0, 0), projection),
-    projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
-  ];
   const age0WallFramePoints = [
     projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
     projectIso(model.frame.point(model.maxYearExt, 0, 0), projection),
@@ -2057,9 +1768,6 @@ export default function PlateViz({
     ),
     projectIso(model.frame.point(model.minYearExt, 0, 0), projection),
   ];
-  const floorFrameString = floorFramePoints
-    .map((p) => `${p.x},${p.y}`)
-    .join(" ");
   const reverseFloorFrameString = useMemo(() => {
     const points = [
       projectIso(
@@ -2245,7 +1953,7 @@ export default function PlateViz({
     stroke: vizStyle.ages.stroke,
     strokeWidth: vizStyle.ages.thickWidth,
   };
-  const wall2025Style = {
+  const baseWallStyle = {
     wallFill: vizStyle.wall.fill,
     wallStroke: vizStyle.wall.stroke,
     ageStroke: vizStyle.ages.stroke,
@@ -2264,6 +1972,7 @@ export default function PlateViz({
     surfaceStroke: vizStyle.surface.stroke,
     surfaceStrokeWidth: vizStyle.surface.strokeWidth,
   };
+  const wall2025Style = baseWallStyle;
   const linesVizStyle = {
     years: vizStyle.years,
     ages: vizStyle.ages,
@@ -2303,11 +2012,42 @@ export default function PlateViz({
     () => ({ ...activeAxisLabelLayout, side: "left" as const }),
     [activeAxisLabelLayout]
   );
-  const REVERSE_YEAR_LABEL_X_OFFSET = -22;
-  const REVERSE_AGE_LEADER_SCALE = 1.5;
-  const REVERSE_AGE_LEADER_OFFSET = 4;
-  const REVERSE_VALUE_LEADER_SCALE = 1.5;
-  const REVERSE_VALUE_LEADER_OFFSET = 4;
+  const reverseLabelConfig = {
+    ageSide: "left" as const,
+    ageTextAnchor: "start" as const,
+    ageTickScale: 1.5,
+    ageTickOffset: 4,
+    valueSide: "right" as const,
+    valueTextAnchor: "end" as const,
+    valueTickScale: 1.5,
+    valueTickOffset: 4,
+    valueIncludeZero: true,
+    yearAngleDeg: 270,
+    yearYOffset: 0,
+    yearXOffset: -22,
+    yearAnchorAge: reverseModel.ages[0],
+  };
+  const valueLabelFormat = isUsaDataset ? ("millions" as const) : undefined;
+  const titleVariant = isUsaDataset ? ("usa" as const) : undefined;
+  const yearLabelSides = isUsaDataset ? (["bottom"] as const) : undefined;
+  const commonLabelProps = {
+    axisLabelBaseStyle: AXIS_LABEL_STYLE,
+    vizStyle: {
+      ages: { stroke: vizStyle.ages.stroke },
+      values: { stroke: vizStyle.values.stroke },
+      years: { stroke: vizStyle.years.stroke },
+    },
+    valueLevels: {
+      left: valueLevelConfig.left,
+      right: valueLevelConfig.right,
+    },
+    valueLabelFormat,
+    age100Text: isUsaDataset ? "100+ years old" : undefined,
+    titleProps,
+    titleVariant,
+    topValueByYear,
+    yearLabelSides,
+  };
   const yearMax = model.frame.maxYear;
   const yearMaxLine = model.yearLines.find((line) => line.year === yearMax);
   const yearMaxPointsStr = yearMaxLine
@@ -2324,14 +2064,17 @@ export default function PlateViz({
   );
   const reverseWall1900Style = useMemo(
     () => ({
-      ...wall2025Style,
-      ageThinOpacity: Math.min(1, wall2025Style.ageThinOpacity * 2),
-      ageThickOpacity: Math.min(1, wall2025Style.ageThickOpacity * 1.2),
-      valueThinOpacity: Math.min(1, wall2025Style.valueThinOpacity * 1.6),
-      valueThickOpacity: Math.min(1, wall2025Style.valueThickOpacity * 1.2),
+      ...baseWallStyle,
+      ageThinOpacity: Math.min(1, baseWallStyle.ageThinOpacity * 2),
+      ageThickOpacity: Math.min(1, baseWallStyle.ageThickOpacity * 1.2),
+      valueThinOpacity: Math.min(1, baseWallStyle.valueThinOpacity * 1.6),
+      valueThickOpacity: Math.min(1, baseWallStyle.valueThickOpacity * 1.2),
     }),
-    [wall2025Style]
+    [baseWallStyle]
   );
+  const hoverFocus = hover
+    ? { year: hover.year, age: hover.age, birthYear: hover.year - hover.age }
+    : null;
 
   return (
     <div
@@ -2455,6 +2198,11 @@ export default function PlateViz({
                     cohortStyle={vizStyle.cohorts}
                     isotonicSegByCell={model.isotonicSegByQuad}
                     isotonicStyle={isotonicStyle}
+                    hoverFocus={hoverFocus ?? undefined}
+                    hoverOpacity={{
+                      highlightMult: HOVER_HIGHLIGHT_MULT,
+                      dimMult: HOVER_DIM_MULT,
+                    }}
                   />
                 </g>
               </>
@@ -2483,24 +2231,9 @@ export default function PlateViz({
                 years={model.years}
                 minYearExt={model.minYearExt}
                 maxYearExt={model.maxYearExt}
-                axisLabelBaseStyle={AXIS_LABEL_STYLE}
                 axisLabelLayout={activeAxisLabelLayout}
-                vizStyle={{
-                  ages: { stroke: vizStyle.ages.stroke },
-                  values: { stroke: vizStyle.values.stroke },
-                  years: { stroke: vizStyle.years.stroke },
-                }}
-                valueLevels={{
-                  left: valueLevelConfig.left,
-                  right: valueLevelConfig.right,
-                }}
                 showTitle={showTitle}
-                valueLabelFormat={isUsaDataset ? "millions" : undefined}
-                age100Text={isUsaDataset ? "100+ years old" : undefined}
-                titleProps={titleProps}
-                titleVariant={isUsaDataset ? "usa" : undefined}
-                topValueByYear={topValueByYear}
-                yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
+                {...commonLabelProps}
               />
             )}
             {FEATURES.hover && layersEnabled.interaction && (
@@ -2521,50 +2254,6 @@ export default function PlateViz({
                 strokeLinecap="round"
                 strokeLinejoin="round"
               />
-            )}
-            {DEBUG_CONTOUR_PROJ && debugContourOverlay && (
-              <g id="layer-debug-contours" pointerEvents="none">
-                {debugContourOverlay.rawRuns.map((run, runIndex) => (
-                  <polyline
-                    key={`debug-raw-${runIndex}`}
-                    points={run.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill="none"
-                    stroke="magenta"
-                    strokeWidth={1}
-                    strokeOpacity={0.8}
-                  />
-                ))}
-                {debugContourOverlay.directRuns.map((run, runIndex) => (
-                  <polyline
-                    key={`debug-direct-${runIndex}`}
-                    points={run.map((p) => `${p.x},${p.y}`).join(" ")}
-                    fill="none"
-                    stroke="cyan"
-                    strokeWidth={1}
-                    strokeOpacity={0.8}
-                  />
-                ))}
-                {debugContourOverlay.rawWallDots.map((p, i) => (
-                  <circle
-                    key={`debug-raw-dot-${i}`}
-                    cx={p.x}
-                    cy={p.y}
-                    r={1.6}
-                    fill="magenta"
-                    opacity={0.9}
-                  />
-                ))}
-                {debugContourOverlay.directWallDots.map((p, i) => (
-                  <circle
-                    key={`debug-direct-dot-${i}`}
-                    cx={p.x}
-                    cy={p.y}
-                    r={1.6}
-                    fill="cyan"
-                    opacity={0.9}
-                  />
-                ))}
-              </g>
             )}
           </g>
         </svg>
@@ -2691,24 +2380,6 @@ export default function PlateViz({
                   alignItems: "center",
                 }}
               >
-                <label
-                  style={{
-                    display: "inline-flex",
-                    flexDirection: "column",
-                    gap: "0.25rem",
-                  }}
-                >
-                  Contour mode
-                  <select
-                    value={topContourMode}
-                    onChange={(e) =>
-                      setTopContourMode(e.target.value as "raw" | "segmented")
-                    }
-                  >
-                    <option value="raw">raw</option>
-                    <option value="segmented">segmented</option>
-                  </select>
-                </label>
                 <label style={{ display: "inline-flex", gap: "0.4rem" }}>
                   <input
                     type="checkbox"
@@ -2764,301 +2435,55 @@ export default function PlateViz({
           );
         })()}
       </div>
-      <div
-        style={{
-          marginTop: 24,
-          position: "relative",
-          width: WIDTH,
-          height: HEIGHT,
+      <ReverseView
+        width={WIDTH}
+        height={HEIGHT}
+        svgStyle={vizStyle.svg}
+        offsetX={reverseOffsetX}
+        offsetY={reverseOffsetY}
+        layersEnabled={{
+          architecture: layersEnabled.architecture,
+          surface: layersEnabled.surface,
+          labels: FEATURES.labels && layersEnabled.labels,
         }}
-      >
-        <svg
-          width={WIDTH}
-          height={HEIGHT}
-          style={{
-            border: `1px solid ${vizStyle.svg.border}`,
-            background: vizStyle.svg.background,
-            display: "block",
-          }}
-        >
-          <g transform={`translate(${reverseOffsetX}, ${reverseOffsetY})`}>
-            {layersEnabled.architecture && (
-              <ArchitectureLayer
-                frame={reverseModel.frame}
-                projection={reverseProjection}
-                minYearExt={reverseModel.minYearExt}
-                maxYearExt={reverseModel.maxYearExt}
-                extendLeftYears={EXTEND_LEFT_YEARS}
-                extendRightYears={EXTEND_RIGHT_YEARS}
-                floorFrameString={reverseFloorFrameString}
-                floorAlpha={floorAlpha}
-                shadingInkColor={shadingConfig.inkColor}
-                age0WallIsolineStyle={age0WallIsolineStyle}
-                age0WallFullLevels={[]}
-                age0Wall2025OnlyLevels={[]}
-                floorStyle={floorStyle}
-                floorAgeStyle={floorAgeStyle}
-                wall2025Style={wall2025Style}
-                shadingConfig={shadingConfig}
-                surfacePoints={reverseModel.surfacePoints}
-                rows={reverseModel.rows}
-                cols={reverseModel.cols}
-                ages={reverseModel.ages}
-                maxSurvivors={reverseModel.maxSurvivors}
-                floorZ={FLOOR_DEPTH}
-                valueStep={activeWall2025ValueStep}
-                valueMinorStep={activeWall2025MinorStep}
-                showWall2025={false}
-              />
-            )}
-            {layersEnabled.surface && (
-              <>
-                <g>
-                  <SurfaceLayer
-                    quads={reverseModel.quads}
-                    cells={reverseModel.cells}
-                    globalTriSort={globalTriSort}
-                    depthSortSign={-1}
-                    surfaceStyle={{
-                      fill: vizStyle.surface.fill,
-                      stroke: vizStyle.surface.stroke,
-                      strokeWidth: vizStyle.surface.strokeWidth,
-                    }}
-                    shading={shadingConfig}
-                    lightDir={lightDir}
-                    drawSegments={reverseModel.cells.length > 0}
-                    yearSegByCell={reverseModel.yearSegByQuad}
-                    yearStyle={vizStyle.years}
-                    ageSegByCell={reverseModel.ageSegByQuad}
-                    ageStyle={vizStyle.ages}
-                    valueSegByCell={reverseModel.valueSegByQuad}
-                    valueStyle={linesVizStyle.values}
-                    cohortSegByCell={reverseModel.cohortSegByQuad}
-                    cohortStyle={vizStyle.cohorts}
-                    isotonicSegByCell={reverseModel.isotonicSegByQuad}
-                    isotonicStyle={isotonicStyle}
-                  />
-                </g>
-              </>
-            )}
-            {reverseAge0Wall && (
-              <>
-                <defs>
-                  <clipPath
-                    id={reverseAge0WallClipId}
-                    clipPathUnits="userSpaceOnUse"
-                  >
-                    <polygon points={reverseAge0Wall} />
-                  </clipPath>
-                </defs>
-                <polygon
-                  id="layer-reverse-age0-wall"
-                  points={reverseAge0Wall}
-                  fill="#f5f3e5"
-                  stroke="none"
-                />
-                <g clipPath={`url(#${reverseAge0WallClipId})`}>
-                  {reverseAge0WallYearLines.map((line) => (
-                    <line
-                      key={`rev-age0-year-${line.year}`}
-                      x1={line.start.x}
-                      y1={line.start.y}
-                      x2={line.end.x}
-                      y2={line.end.y}
-                      stroke={vizStyle.years.stroke}
-                      strokeWidth={
-                        line.heavy ? vizStyle.years.thickWidth : vizStyle.years.thinWidth
-                      }
-                      strokeOpacity={
-                        line.heavy ? vizStyle.years.thickOpacity : vizStyle.years.thinOpacity
-                      }
-                      strokeLinecap="round"
-                    />
-                  ))}
-                  {reverseAge0WallValueLines.map((line) => (
-                    <line
-                      key={`rev-age0-val-${line.level}`}
-                      x1={line.start.x}
-                      y1={line.start.y}
-                      x2={line.end.x}
-                      y2={line.end.y}
-                      stroke={vizStyle.values.stroke}
-                      strokeWidth={
-                        line.heavy ? vizStyle.values.thickWidth : vizStyle.values.thinWidth
-                      }
-                      strokeOpacity={
-                        line.heavy ? vizStyle.values.thickOpacity : vizStyle.values.thinOpacity
-                      }
-                      strokeLinecap="round"
-                    />
-                  ))}
-                </g>
-              </>
-            )}
-            {FEATURES.wall2025 && (
-              <YearWall
-                surfacePoints={reverseModel.surfacePoints}
-                topEdge2D={wall1900TopEdge2D}
-                wallYear={reverseModel.frame.minYear}
-                colIndex={0}
-                rows={reverseModel.rows}
-                cols={reverseModel.cols}
-                projection={reverseProjection}
-                floorZ={FLOOR_DEPTH}
-                ages={reverseModel.ages}
-                maxSurvivors={reverseModel.maxSurvivors}
-                valueStep={activeWall2025ValueStep}
-                valueMinorStep={activeWall2025MinorStep}
-                frame={reverseModel.frame}
-                shading={shadingConfig}
-                style={reverseWall1900Style}
-              />
-            )}
-            {reverseModel.yearLines.find(
-              (line) => line.year === reverseModel.frame.minYear
-            ) && (
-                <polyline
-                  points={reverseModel.yearLines
-                    .find((line) => line.year === reverseModel.frame.minYear)!
-                    .points.map((p) => `${p.x},${p.y}`)
-                    .join(" ")}
-                  fill="none"
-                  stroke={vizStyle.years.stroke}
-                  strokeWidth={vizStyle.years.thickWidth}
-                  strokeOpacity={vizStyle.years.thickOpacity}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              )}
-            {reverseAge0WallYearLines.find(
-              (line) => line.year === reverseModel.frame.maxYear
-            ) && reverseAge0WallTopLine && (
-                <line
-                  x1={
-                    reverseAge0WallYearLines.find(
-                      (line) => line.year === reverseModel.frame.maxYear
-                    )!.start.x
-                  }
-                  y1={
-                    reverseAge0WallYearLines.find(
-                      (line) => line.year === reverseModel.frame.maxYear
-                    )!.start.y
-                  }
-                  x2={
-                    reverseAge0WallTopLine.points[
-                      Math.max(
-                        0,
-                        reverseModel.years.indexOf(reverseModel.frame.maxYear)
-                      )
-                    ]?.x ?? reverseAge0WallYearLines.find(
-                      (line) => line.year === reverseModel.frame.maxYear
-                    )!.end.x
-                  }
-                  y2={
-                    reverseAge0WallTopLine.points[
-                      Math.max(
-                        0,
-                        reverseModel.years.indexOf(reverseModel.frame.maxYear)
-                      )
-                    ]?.y ?? reverseAge0WallYearLines.find(
-                      (line) => line.year === reverseModel.frame.maxYear
-                    )!.end.y
-                  }
-                  stroke={vizStyle.years.stroke}
-                  strokeWidth={vizStyle.years.thickWidth}
-                  strokeOpacity={vizStyle.years.thickOpacity}
-                  strokeLinecap="round"
-                />
-              )}
-            {reverseModel.ageLines.find(
-              (line) => line.age === reverseModel.ages[0]
-            ) && (
-                <polyline
-                  points={reverseModel.ageLines
-                    .find((line) => line.age === reverseModel.ages[0])!
-                    .points.map((p) => `${p.x},${p.y}`)
-                    .join(" ")}
-                  fill="none"
-                  stroke={vizStyle.ages.stroke}
-                  strokeWidth={vizStyle.ages.thickWidth}
-                  strokeOpacity={vizStyle.ages.thickOpacity}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              )}
-            {reverseAge0WallValueLines.find((line) => line.level === 0) && (
-              <line
-                x1={
-                  reverseAge0WallValueLines.find(
-                    (line) => line.level === 0
-                  )!.start.x
-                }
-                y1={
-                  reverseAge0WallValueLines.find(
-                    (line) => line.level === 0
-                  )!.start.y
-                }
-                x2={
-                  reverseAge0WallValueLines.find(
-                    (line) => line.level === 0
-                  )!.end.x
-                }
-                y2={
-                  reverseAge0WallValueLines.find(
-                    (line) => line.level === 0
-                  )!.end.y
-                }
-                stroke={vizStyle.values.stroke}
-                strokeWidth={vizStyle.values.thickWidth}
-                strokeOpacity={vizStyle.values.thickOpacity}
-                strokeLinecap="round"
-              />
-            )}
-            {FEATURES.labels && layersEnabled.labels && (
-              <LabelsLayer
-                frame={reverseModel.frame}
-                projection={reverseProjection}
-                years={reverseModel.years}
-                minYearExt={reverseModel.minYearExt}
-                maxYearExt={reverseModel.maxYearExt}
-                axisLabelBaseStyle={AXIS_LABEL_STYLE}
-                axisLabelLayout={reverseAxisLabelLayout}
-                vizStyle={{
-                  ages: { stroke: vizStyle.ages.stroke },
-                  values: { stroke: vizStyle.values.stroke },
-                  years: { stroke: vizStyle.years.stroke },
-                }}
-                valueLevels={{
-                  left: valueLevelConfig.left,
-                  right: valueLevelConfig.right,
-                }}
-                showTitle={false}
-                valueLabelFormat={isUsaDataset ? "millions" : undefined}
-                age100Text={isUsaDataset ? "100+ years old" : undefined}
-                ageLabelSideOverride="left"
-                ageLabelTextAnchorOverride="start"
-                ageLabelShowLeaders
-                ageLabelLeaderScale={REVERSE_AGE_LEADER_SCALE}
-                ageLabelLeaderOffset={REVERSE_AGE_LEADER_OFFSET}
-                valueLabelSideOverride="right"
-                valueLabelTextAnchorOverride="end"
-                valueLabelShowLeaders
-                valueLabelLeaderScale={REVERSE_VALUE_LEADER_SCALE}
-                valueLabelLeaderOffset={REVERSE_VALUE_LEADER_OFFSET}
-                valueLabelIncludeZero
-                yearBottomAngleDeg={270}
-                yearBottomYOffset={0}
-                yearBottomXOffset={REVERSE_YEAR_LABEL_X_OFFSET}
-                yearBottomAnchorAge={reverseModel.ages[0]}
-                titleProps={titleProps}
-                titleVariant={isUsaDataset ? "usa" : undefined}
-                topValueByYear={topValueByYear}
-                yearLabelSides={isUsaDataset ? ["bottom"] : undefined}
-              />
-            )}
-          </g>
-        </svg>
-      </div>
+        showWall1900={FEATURES.wall2025}
+        model={reverseModel}
+        projection={reverseProjection}
+        floorFrameString={reverseFloorFrameString}
+        floorAlpha={floorAlpha}
+        shadingConfig={shadingConfig}
+        floorStyle={floorStyle}
+        floorAgeStyle={floorAgeStyle}
+        age0WallIsolineStyle={age0WallIsolineStyle}
+        wall2025Style={wall2025Style}
+        wall1900Style={reverseWall1900Style}
+        wall1900TopEdge2D={wall1900TopEdge2D}
+        floorZ={FLOOR_DEPTH}
+        valueStep={activeWall2025ValueStep}
+        valueMinorStep={activeWall2025MinorStep}
+        extendLeftYears={EXTEND_LEFT_YEARS}
+        extendRightYears={EXTEND_RIGHT_YEARS}
+        globalTriSort={globalTriSort}
+        lightDir={lightDir}
+        surfaceStyle={{
+          fill: vizStyle.surface.fill,
+          stroke: vizStyle.surface.stroke,
+          strokeWidth: vizStyle.surface.strokeWidth,
+        }}
+        yearStyle={vizStyle.years}
+        ageStyle={vizStyle.ages}
+        cohortStyle={vizStyle.cohorts}
+        valueStyle={linesVizStyle.values}
+        isotonicStyle={isotonicStyle}
+        age0Wall={reverseAge0Wall}
+        age0WallClipId={reverseAge0WallClipId}
+        age0WallYearLines={reverseAge0WallYearLines}
+        age0WallValueLines={reverseAge0WallValueLines}
+        age0WallTopLine={reverseAge0WallTopLine}
+        axisLabelLayout={reverseAxisLabelLayout}
+        reverseLabelConfig={reverseLabelConfig}
+        commonLabelProps={commonLabelProps}
+      />
     </div>
   );
 }

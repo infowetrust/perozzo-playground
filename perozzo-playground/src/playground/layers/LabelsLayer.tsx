@@ -33,14 +33,14 @@ type LabelsLayerProps = {
   age100Text?: string;
   ageLabelSideOverride?: "left" | "right" | "both";
   ageLabelTextAnchorOverride?: "start" | "middle" | "end";
-  ageLabelShowLeaders?: boolean;
-  ageLabelLeaderScale?: number;
-  ageLabelLeaderOffset?: number;
+  ageLabelShowTicks?: boolean;
+  ageLabelTickScale?: number;
+  ageLabelTickOffset?: number;
   valueLabelSideOverride?: "left" | "right" | "both";
   valueLabelTextAnchorOverride?: "start" | "middle" | "end";
-  valueLabelShowLeaders?: boolean;
-  valueLabelLeaderScale?: number;
-  valueLabelLeaderOffset?: number;
+  valueLabelShowTicks?: boolean;
+  valueLabelTickScale?: number;
+  valueLabelTickOffset?: number;
   valueLabelIncludeZero?: boolean;
   yearBottomAngleDeg?: number;
   yearBottomYOffset?: number;
@@ -84,14 +84,14 @@ export default function LabelsLayer({
   age100Text,
   ageLabelSideOverride,
   ageLabelTextAnchorOverride,
-  ageLabelShowLeaders,
-  ageLabelLeaderScale,
-  ageLabelLeaderOffset,
+  ageLabelShowTicks,
+  ageLabelTickScale,
+  ageLabelTickOffset,
   valueLabelSideOverride,
   valueLabelTextAnchorOverride,
-  valueLabelShowLeaders,
-  valueLabelLeaderScale,
-  valueLabelLeaderOffset,
+  valueLabelShowTicks,
+  valueLabelTickScale,
+  valueLabelTickOffset,
   valueLabelIncludeZero,
   yearBottomAngleDeg,
   yearBottomYOffset,
@@ -127,9 +127,9 @@ export default function LabelsLayer({
         style={ageLabelStyle}
         age100Text={age100Text}
         textAnchorOverride={ageLabelTextAnchorOverride}
-        showLeaders={ageLabelShowLeaders}
-        leaderScale={ageLabelLeaderScale}
-        leaderOffset={ageLabelLeaderOffset}
+        showTicks={ageLabelShowTicks}
+        tickScale={ageLabelTickScale}
+        tickOffset={ageLabelTickOffset}
       />
       <ValueIsolineLabels
         frame={frame}
@@ -144,9 +144,9 @@ export default function LabelsLayer({
         rightLevels={valueLevels.right}
         labelFormat={valueLabelFormat}
         textAnchorOverride={valueLabelTextAnchorOverride}
-        showLeaders={valueLabelShowLeaders}
-        leaderScale={valueLabelLeaderScale}
-        leaderOffset={valueLabelLeaderOffset}
+        showTicks={valueLabelShowTicks}
+        tickScale={valueLabelTickScale}
+        tickOffset={valueLabelTickOffset}
         includeZeroLevel={valueLabelIncludeZero}
       />
       <YearLabels

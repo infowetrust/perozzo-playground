@@ -18,9 +18,9 @@ type ValueIsolineLabelsProps = {
   rightLevels: number[];
   labelFormat?: "millions";
   textAnchorOverride?: "start" | "middle" | "end";
-  showLeaders?: boolean;
-  leaderScale?: number;
-  leaderOffset?: number;
+  showTicks?: boolean;
+  tickScale?: number;
+  tickOffset?: number;
   includeZeroLevel?: boolean;
 };
 
@@ -37,9 +37,9 @@ export default function ValueIsolineLabels({
   rightLevels,
   labelFormat,
   textAnchorOverride,
-  showLeaders = false,
-  leaderScale = 1,
-  leaderOffset = 0,
+  showTicks = false,
+  tickScale = 1,
+  tickOffset = 0,
   includeZeroLevel = false,
 }: ValueIsolineLabelsProps) {
   const sides: LabelSide[] =
@@ -91,18 +91,18 @@ export default function ValueIsolineLabels({
           );
           const dir = dirForLevel(level, s, baseYear, inwardYear);
           const textPos = {
-            x: anchor.x + dir.x * (tickLen * leaderScale + textOffset + leaderOffset),
-            y: anchor.y + dir.y * (tickLen * leaderScale + textOffset + leaderOffset),
+            x: anchor.x + dir.x * (tickLen * tickScale + textOffset + tickOffset),
+            y: anchor.y + dir.y * (tickLen * tickScale + textOffset + tickOffset),
           };
 
           return (
             <g key={`value-label-${s}-${level}`}>
-              {showLeaders && (
+              {showTicks && (
                 <line
                   x1={anchor.x}
                   y1={anchor.y}
-                  x2={anchor.x + dir.x * tickLen * leaderScale}
-                  y2={anchor.y + dir.y * tickLen * leaderScale}
+                  x2={anchor.x + dir.x * tickLen * tickScale}
+                  y2={anchor.y + dir.y * tickLen * tickScale}
                   stroke={style.color}
                   strokeOpacity={style.opacity}
                   strokeWidth={1}

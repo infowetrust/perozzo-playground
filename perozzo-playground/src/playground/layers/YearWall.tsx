@@ -62,10 +62,6 @@ type YearWallProps = {
   style: WallStyle;
 };
 
-const DEBUG_WALL_GRID = true;
-const DEBUG_WALL_CLIP = false;
-let loggedWallGridOnce = false;
-
 export default function YearWall({
   surfacePoints,
   topEdge2D,
@@ -83,7 +79,6 @@ export default function YearWall({
   shading,
   style,
 }: YearWallProps) {
-  const DEBUG_LOG_KEY = "reverse-1900";
   if (rows <= 0 || cols <= 0 || surfacePoints.length === 0) {
     return null;
   }
@@ -253,23 +248,6 @@ export default function YearWall({
   }
   const valueZeroLine = valueLines.find((line) => line.key === "val-0");
   const valueLinesInner = valueLines.filter((line) => line.key !== "val-0");
-  if (
-    DEBUG_WALL_GRID &&
-    !loggedWallGridOnce &&
-    typeof wallYear === "number" &&
-    wallYear === frame.minYear &&
-    DEBUG_LOG_KEY === "reverse-1900"
-  ) {
-    loggedWallGridOnce = true;
-    console.log("[WALL GRID COUNTS]", {
-      wallYear,
-      ages: ageLines.length,
-      ageInner: ageLinesInner.length,
-      values: valueLines.length,
-      valueInner: valueLinesInner.length,
-    });
-  }
-
   return (
     <>
       <defs>
@@ -326,15 +304,6 @@ export default function YearWall({
           />
         ))}
       </g>
-      {DEBUG_WALL_CLIP && (
-        <polygon
-          points={yearWallPolyString}
-          fill="none"
-          stroke="magenta"
-          strokeWidth={2.5}
-          strokeOpacity={0.8}
-        />
-      )}
       {ageBaseLine && (
         <line
           x1={insetPoint(ageBaseLine.top).x}

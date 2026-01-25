@@ -16,9 +16,9 @@ type AgeLabelsProps = {
   style: AxisLabelStyle;
   age100Text?: string;
   textAnchorOverride?: "start" | "middle" | "end";
-  showLeaders?: boolean;
-  leaderScale?: number;
-  leaderOffset?: number;
+  showTicks?: boolean;
+  tickScale?: number;
+  tickOffset?: number;
 };
 
 const LABEL_AGES = [0, 25, 50, 75, 100];
@@ -41,9 +41,9 @@ export default function AgeLabels({
   style,
   age100Text,
   textAnchorOverride,
-  showLeaders = false,
-  leaderScale = 1,
-  leaderOffset = 0,
+  showTicks = false,
+  tickScale = 1,
+  tickOffset = 0,
 }: AgeLabelsProps) {
   const sides: LabelSide[] =
     side === "both" ? ["left", "right"] : [side ?? "left"];
@@ -84,18 +84,18 @@ export default function AgeLabels({
           const anchor = projectIso(frame.point(baseYear, age, 0), projection);
           const dir = dirForAge(age, s, baseYear, inwardYear);
           const textPos = {
-            x: anchor.x + dir.x * (tickLen * leaderScale + textOffset + leaderOffset),
-            y: anchor.y + dir.y * (tickLen * leaderScale + textOffset + leaderOffset),
+            x: anchor.x + dir.x * (tickLen * tickScale + textOffset + tickOffset),
+            y: anchor.y + dir.y * (tickLen * tickScale + textOffset + tickOffset),
           };
 
           return (
             <g key={`age-label-${s}-${age}`}>
-              {showLeaders && (
+              {showTicks && (
                 <line
                   x1={anchor.x}
                   y1={anchor.y}
-                  x2={anchor.x + dir.x * tickLen * leaderScale}
-                  y2={anchor.y + dir.y * tickLen * leaderScale}
+                  x2={anchor.x + dir.x * tickLen * tickScale}
+                  y2={anchor.y + dir.y * tickLen * tickScale}
                   stroke={style.color}
                   strokeOpacity={style.opacity}
                   strokeWidth={1}

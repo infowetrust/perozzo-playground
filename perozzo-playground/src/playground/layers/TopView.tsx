@@ -62,8 +62,6 @@ type TopViewProps = {
   showTitle?: boolean;
 };
 
-const DEBUG_CONTOUR_STATS = true;
-let contourStatsLogged = false;
 const TOPVIEW_HOVER_PX = 8;
 const HOVER_POINT_A_COLOR = "#c43b3b";
 const HOVER_POINT_B_COLOR = "#2f69c6";
@@ -422,48 +420,6 @@ export default function TopView({
           );
         })
       : [];
-
-  if (DEBUG_CONTOUR_STATS && !contourStatsLogged) {
-    contourStatsLogged = true;
-    const level = 12_000_000;
-    const rawRuns = contours.filter((iso) => iso.level === level);
-    const rawPointsTotal = rawRuns.reduce(
-      (sum, run) => sum + run.points.length,
-      0
-    );
-    const segs = rawRuns.flatMap((iso) => {
-      const points = iso.points.filter(
-        (p) =>
-          Number.isFinite(p.year) && Number.isFinite(p.age ?? NaN)
-      );
-      if (points.length < 2) return [];
-      const pts2 = points.map((p) => ({
-        x: scaleX(p.year),
-        y: scaleY(p.age as number),
-      }));
-      const data = points.map((p) => ({
-        year: p.year,
-        age: p.age as number,
-      }));
-      return segmentizeContourPolyline(
-        iso.level,
-        pts2,
-        data,
-        years,
-        ages
-      );
-    });
-    const uniqueCellsTouched = new Set(segs.map((seg) => seg.cellKey))
-      .size;
-    // eslint-disable-next-line no-console
-    console.log("[TOPVIEW CONTOUR STATS]", {
-      level,
-      rawRuns: rawRuns.length,
-      rawPointsTotal,
-      segLinesTotal: segs.length,
-      uniqueCellsTouched,
-    });
-  }
 
   return (
     <svg

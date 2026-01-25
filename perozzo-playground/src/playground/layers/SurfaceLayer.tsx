@@ -2,6 +2,10 @@ import { quadNormal, lambert, inkAlphaFromBrightness } from "../shading";
 import type { Point2D, Point3D } from "../../core/types";
 import type { LineStyle, ShadingConfig } from "../vizConfig";
 import { isHeavy, TRI_RENDER } from "../vizConfig";
+import {
+  contourDepthForRun,
+  shouldSkipContourRun,
+} from "../contourOverrides";
 
 type Quad = {
   points2D: Point2D[];
@@ -124,6 +128,8 @@ type SurfaceLayerProps = {
     thinOpacity: number;
     thickOpacity: number;
   };
+  hoverFocus?: { year: number; age: number; birthYear: number };
+  hoverOpacity?: { highlightMult: number; dimMult: number };
 };
 
 type SegmentRenderItem = {
@@ -137,6 +143,9 @@ type SegmentRenderItem = {
   stroke: string;
   strokeWidth: number;
   strokeOpacity: number;
+  year?: number;
+  age?: number;
+  birthYear?: number;
   level?: number;
   isContour?: boolean;
   runId?: number;
@@ -164,6 +173,8 @@ export default function SurfaceLayer({
   depthSortSign = 1,
   drawQuads = true,
   drawSegments = true,
+  hoverFocus,
+  hoverOpacity,
 }: SurfaceLayerProps) {
   const useCells = Boolean(cells && cells.length > 0);
   const drawQuadFill = drawQuads && !useCells;
@@ -172,6 +183,12 @@ export default function SurfaceLayer({
   const debugTriStrokeWidth = 0.6;
   const debugTriFill = (index: number) =>
     index % 2 === 0 ? "rgba(0,0,0,0.03)" : "rgba(0,0,0,0.06)";
+  const hoverHighlightMult = hoverOpacity?.highlightMult ?? 1;
+  const hoverDimMult = hoverOpacity?.dimMult ?? 1;
+  const hasFocus = !!hoverFocus;
+  const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+  const applyHoverOpacity = (base: number, isHit: boolean) =>
+    hasFocus ? clamp01(base * (isHit ? hoverHighlightMult : hoverDimMult)) : base;
   const renderSegmentsForCell = (
     quadKey: string
   ): {
@@ -199,7 +216,10 @@ export default function SurfaceLayer({
                 seg.heavy ? yearStyle.thickWidth : yearStyle.thinWidth
               }
               strokeOpacity={
-                seg.heavy ? yearStyle.thickOpacity : yearStyle.thinOpacity
+                applyHoverOpacity(
+                  seg.heavy ? yearStyle.thickOpacity : yearStyle.thinOpacity,
+                  !!(hoverFocus && seg.year === hoverFocus.year)
+                )
               }
               strokeLinecap="round"
             />
@@ -224,7 +244,10 @@ export default function SurfaceLayer({
                   seg.heavy ? ageStyle.thickWidth : ageStyle.thinWidth
                 }
                 strokeOpacity={
-                  seg.heavy ? ageStyle.thickOpacity : ageStyle.thinOpacity
+                  applyHoverOpacity(
+                    seg.heavy ? ageStyle.thickOpacity : ageStyle.thinOpacity,
+                    !!(hoverFocus && seg.age === hoverFocus.age)
+                  )
                 }
                 strokeLinecap="round"
               />
@@ -248,9 +271,7 @@ export default function SurfaceLayer({
                   heavy ? valueStyle.thickWidth : valueStyle.thinWidth
                 }
                 strokeOpacity={
-                  heavy
-                    ? valueStyle.thickOpacity
-                    : valueStyle.thinOpacity
+                  heavy ? valueStyle.thickOpacity : valueStyle.thinOpacity
                 }
                 strokeLinecap="round"
               />
@@ -269,18 +290,23 @@ export default function SurfaceLayer({
               y2={seg.y2}
               stroke={cohortStyle.stroke}
               strokeWidth={
-                seg.heavy
-                  ? cohortStyle.thickWidth
-                  : cohortStyle.thinWidth
-              }
-              strokeOpacity={
-                seg.heavy
-                  ? cohortStyle.thickOpacity
-                  : cohortStyle.thinOpacity
-              }
-              strokeLinecap="round"
-            />
-          ))
+                  seg.heavy
+                    ? cohortStyle.thickWidth
+                    : cohortStyle.thinWidth
+                }
+                strokeOpacity={
+                  applyHoverOpacity(
+                    seg.heavy
+                      ? cohortStyle.thickOpacity
+                      : cohortStyle.thinOpacity,
+                    !!(
+                      hoverFocus && seg.birthYear === hoverFocus.birthYear
+                    )
+                  )
+                }
+                strokeLinecap="round"
+              />
+            ))
         : null;
     const isotonicSegs = isotonicSegByCell?.get(quadKey);
     const renderIsotonicSegs =
@@ -344,7 +370,14 @@ export default function SurfaceLayer({
       stroke: string,
       strokeWidth: number,
       strokeOpacity: number,
-      extras?: { level?: number; isContour?: boolean; runId?: number },
+      extras?: {
+        level?: number;
+        isContour?: boolean;
+        runId?: number;
+        year?: number;
+        age?: number;
+        birthYear?: number;
+      },
       depthBias = 0
     ) => {
       const depthKey =
@@ -362,6 +395,9 @@ export default function SurfaceLayer({
         y1: seg.y1,
         x2: seg.x2,
         y2: seg.y2,
+        year: extras?.year,
+        age: extras?.age,
+        birthYear: extras?.birthYear,
         level: extras?.level,
         isContour: extras?.isContour,
         runId: extras?.runId,
@@ -376,7 +412,11 @@ export default function SurfaceLayer({
           seg,
           yearStyle.stroke,
           seg.heavy ? yearStyle.thickWidth : yearStyle.thinWidth,
-          seg.heavy ? yearStyle.thickOpacity : yearStyle.thinOpacity
+          applyHoverOpacity(
+            seg.heavy ? yearStyle.thickOpacity : yearStyle.thinOpacity,
+            !!(hoverFocus && seg.year === hoverFocus.year)
+          ),
+          { year: seg.year }
         );
       });
     }
@@ -390,7 +430,11 @@ export default function SurfaceLayer({
           seg,
           ageStyle.stroke,
           seg.heavy ? ageStyle.thickWidth : ageStyle.thinWidth,
-          seg.heavy ? ageStyle.thickOpacity : ageStyle.thinOpacity
+          applyHoverOpacity(
+            seg.heavy ? ageStyle.thickOpacity : ageStyle.thinOpacity,
+            !!(hoverFocus && seg.age === hoverFocus.age)
+          ),
+          { age: seg.age }
         );
       });
     }
@@ -418,7 +462,11 @@ export default function SurfaceLayer({
           seg,
           cohortStyle.stroke,
           seg.heavy ? cohortStyle.thickWidth : cohortStyle.thinWidth,
-          seg.heavy ? cohortStyle.thickOpacity : cohortStyle.thinOpacity
+          applyHoverOpacity(
+            seg.heavy ? cohortStyle.thickOpacity : cohortStyle.thinOpacity,
+            !!(hoverFocus && seg.birthYear === hoverFocus.birthYear)
+          ),
+          { birthYear: seg.birthYear }
         );
       });
     }
@@ -449,8 +497,6 @@ export default function SurfaceLayer({
       totalPolys += count;
       hist[count] = (hist[count] ?? 0) + 1;
     }
-    // eslint-disable-next-line no-console
-    console.log("[TRI_DEBUG_VIS]", { hist, totalPolys });
   }
   const stitchContourSegments = (
     segments: SegmentRenderItem[]
@@ -562,15 +608,18 @@ export default function SurfaceLayer({
         extend(true);
         extend(false);
         if (chain.length >= 2) {
-          const nearBias = depthSortSign > 0 ? 1e-6 : -1e-6;
-          const farBias = depthSortSign > 0 ? -1e-6 : 1e-6;
           results.push({
             level,
             points: chain,
             depthKey:
-              level === 20_000_000 && runId === 29
-                ? minDepth + farBias
-                : maxDepth + nearBias,
+              contourDepthForRun({
+                level,
+                runId,
+                minDepth,
+                maxDepth,
+                nearBias: depthSortSign > 0 ? 1e-6 : -1e-6,
+                farBias: depthSortSign > 0 ? -1e-6 : 1e-6,
+              }),
           });
         }
       }
@@ -646,7 +695,7 @@ export default function SurfaceLayer({
             const segItems = buildSegmentItemsForCell(cell.cellKey, segDepth);
             for (const seg of segItems) {
               if (seg.isContour) {
-                if (seg.level === 20_000_000 && seg.runId === 30) {
+                if (shouldSkipContourRun(seg.level ?? 0, seg.runId)) {
                   continue;
                 }
                 contourSegs.push(seg);

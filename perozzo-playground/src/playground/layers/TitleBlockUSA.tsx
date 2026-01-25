@@ -42,7 +42,7 @@ const block = {
 
 export const TITLE_BLOCK_USA_WIDTH = block.width;
 export const TITLE_BLOCK_USA_HEIGHT =
-  block.lines.length * block.gap f5f3e5+
+  block.lines.length * block.gap +
     block.sizeLarge +
     block.gap * 6 +
     block.sizeSmall;
