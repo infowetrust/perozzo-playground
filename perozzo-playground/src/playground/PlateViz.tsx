@@ -34,6 +34,7 @@ import { parseSwedenCsv, makeSwedenSurface } from "../core/sweden";
 import { makeFrame3D, type Frame3D } from "../core/frame3d";
 import { TRI_RENDER } from "./vizConfig";
 import { segmentizeContourPolyline } from "./contourSegmenter";
+import { shouldSkipContourRun } from "./contourOverrides";
 
 type ContourPointFile = { year: number; age: number };
 type ContourFile = {
@@ -782,15 +783,18 @@ function computeAutoCenterOffset(
   projectedSurface: Point2D[],
   floorPoints: Point2D[],
   width: number,
-  height: number
+  height: number,
+  extraPoints: Point2D[] = []
 ): { offsetX: number; offsetY: number } {
   const allX = [
     ...projectedSurface.map((p) => p.x),
     ...floorPoints.map((p) => p.x),
+    ...extraPoints.map((p) => p.x),
   ];
   const allY = [
     ...projectedSurface.map((p) => p.y),
     ...floorPoints.map((p) => p.y),
+    ...extraPoints.map((p) => p.y),
   ];
 
   const minX = Math.min(...allX);
@@ -854,6 +858,19 @@ export default function PlateViz({
   const [topShowIsotonic, setTopShowIsotonic] = useState<boolean>(true);
   const [topContourMode] = useState<"raw" | "segmented">("raw");
   const topViewSvgRef = useRef<SVGSVGElement | null>(null);
+  const reverseViewSvgRef = useRef<SVGSVGElement | null>(null);
+  const [reverseTopShowYears, setReverseTopShowYears] =
+    useState<boolean>(true);
+  const [reverseTopShowAges, setReverseTopShowAges] = useState<boolean>(true);
+  const [reverseTopShowCohorts, setReverseTopShowCohorts] =
+    useState<boolean>(true);
+  const [reverseTopShowContours, setReverseTopShowContours] =
+    useState<boolean>(true);
+  const [reverseTopShowContourCrossings, setReverseTopShowContourCrossings] =
+    useState<boolean>(false);
+  const [reverseTopShowIsotonic, setReverseTopShowIsotonic] =
+    useState<boolean>(true);
+  const [reverseTopContourMode] = useState<"raw" | "segmented">("raw");
 
   const datasetTitleKey = title?.bigWord?.toUpperCase() ?? "";
   const normalizedKey = activeKey?.toLowerCase();
@@ -963,6 +980,10 @@ export default function PlateViz({
         })),
     [contourRuns]
   );
+  const reverseTopViewContourRuns = useMemo(
+    () => topViewContourRuns,
+    [topViewContourRuns]
+  );
   const stereoContourRuns = useMemo(() => {
     const targetLevel = 12_000_000;
     const closedRuns = contourRuns.filter(
@@ -1050,11 +1071,16 @@ export default function PlateViz({
   const buildModel = useCallback(
     (
       proj: ProjectionOptions,
-      opts?: { depthSortSign?: 1 | -1; cullSign?: 1 | -1 }
+      opts?: {
+        depthSortSign?: 1 | -1;
+        cullSign?: 1 | -1;
+        contourRuns?: ContourFile[];
+      }
     ) => {
       const projection = proj;
       const depthSortSign = opts?.depthSortSign ?? 1;
       const cullSign = opts?.cullSign ?? 1;
+      const activeContourRuns = opts?.contourRuns ?? stereoContourRuns;
       const swedenSurface = makeSwedenSurface(swedenRows, { maxHeight });
       const { points: surfacePoints, rows, cols, years, ages } = swedenSurface;
       const maxSurvivors = swedenRows.reduce(
@@ -1440,7 +1466,7 @@ export default function PlateViz({
       const maxZ = surfacePoints.reduce((max, p) => Math.max(max, p.z), 0);
       const zScale = maxSurvivors > 0 ? maxZ / maxSurvivors : 1;
       const contourPolylines2D = buildValueContours2D(
-        stereoContourRuns,
+        activeContourRuns,
         projectedSurface,
         surfacePoints,
         ages,
@@ -1586,7 +1612,18 @@ export default function PlateViz({
     },
     [swedenRows, stereoContourRuns, isotonicRows, maxHeight]
   );
-  const model = useMemo(() => buildModel(projection), [buildModel, projection]);
+  const frontContourRuns = useMemo(
+    () => stereoContourRuns,
+    [stereoContourRuns]
+  );
+  const reverseContourRuns = useMemo(
+    () => stereoContourRuns,
+    [stereoContourRuns]
+  );
+  const model = useMemo(
+    () => buildModel(projection, { contourRuns: frontContourRuns }),
+    [buildModel, projection, frontContourRuns]
+  );
   const reverseProjection = useMemo(
     () => ({
       ...projection,
@@ -1605,8 +1642,13 @@ export default function PlateViz({
     [projection]
   );
   const reverseModel = useMemo(
-    () => buildModel(reverseProjection, { depthSortSign: -1, cullSign: -1 }),
-    [buildModel, reverseProjection]
+    () =>
+      buildModel(reverseProjection, {
+        depthSortSign: -1,
+        cullSign: -1,
+        contourRuns: reverseContourRuns,
+      }),
+    [buildModel, reverseProjection, reverseContourRuns]
   );
 
   const age100Wall = useMemo(() => {
@@ -1703,6 +1745,34 @@ export default function PlateViz({
     () => reverseModel.ageLines.find((line) => line.age === reverseModel.ages[0]),
     [reverseModel.ageLines, reverseModel.ages]
   );
+  const reverseSkipContourRun = useCallback(
+    (level: number, runId?: number) => {
+      if (level === 20_000_000 && runId === 30) {
+        return false;
+      }
+      return shouldSkipContourRun(level, runId);
+    },
+    []
+  );
+  const buildTopViewLayout = (years: number[], ages: number[]) => {
+    const topPad = 44;
+    const rightPad = 140;
+    const bottomPad = 68;
+    const leftPad = 52;
+    const plotHeight = Math.round(HEIGHT * 0.45);
+    const ageSpan = ages[ages.length - 1] - ages[0];
+    const yearSpan = years[years.length - 1] - years[0];
+    const yPxPerAge = ageSpan !== 0 ? plotHeight / ageSpan : 1;
+    const plotWidth = Math.round(yPxPerAge * yearSpan);
+    return {
+      topPad,
+      rightPad,
+      bottomPad,
+      leftPad,
+      topViewWidth: plotWidth + leftPad + rightPad,
+      topViewHeight: plotHeight + topPad + bottomPad,
+    };
+  };
   const layersEnabled = {
     architecture: true,
     surface: true,
@@ -1719,14 +1789,31 @@ export default function PlateViz({
       HEIGHT
     );
   }, [model.projectedSurface, model.floorPoints, WIDTH, HEIGHT]);
+  const reverseAgePadPoints = useMemo(() => {
+    const pad = reverseModel.frame.ageStep;
+    if (!Number.isFinite(pad) || pad === 0) return [];
+    const minYear = reverseModel.frame.minYear;
+    const maxYear = reverseModel.frame.maxYear;
+    return [
+      projectIso(reverseModel.frame.point(minYear, -pad, 0), reverseProjection),
+      projectIso(reverseModel.frame.point(maxYear, -pad, 0), reverseProjection),
+    ];
+  }, [reverseModel.frame, reverseProjection]);
   const { offsetX: reverseOffsetX, offsetY: reverseOffsetY } = useMemo(() => {
     return computeAutoCenterOffset(
       reverseModel.projectedSurface,
       reverseModel.floorPoints,
       WIDTH,
-      HEIGHT
+      HEIGHT,
+      reverseAgePadPoints
     );
-  }, [reverseModel.projectedSurface, reverseModel.floorPoints, WIDTH, HEIGHT]);
+  }, [
+    reverseModel.projectedSurface,
+    reverseModel.floorPoints,
+    WIDTH,
+    HEIGHT,
+    reverseAgePadPoints,
+  ]);
   const maxZ = model.maxZ;
   const shadingConfig = vizStyle.shading;
   const lightDir = normalize3(shadingConfig.lightDir);
@@ -1893,6 +1980,26 @@ export default function PlateViz({
     const link = document.createElement("a");
     link.href = url;
     link.download = "usa-topview-contours.svg";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+  const handleDownloadReverseViewSvg = () => {
+    if (!reverseViewSvgRef.current) {
+      return;
+    }
+    const clone = reverseViewSvgRef.current.cloneNode(true) as SVGSVGElement;
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+    const serialized = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([serialized], {
+      type: "image/svg+xml;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "reverse-view.svg";
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -2114,6 +2221,19 @@ export default function PlateViz({
           >
             Download Top View SVG
           </button>
+          <button
+            type="button"
+            onClick={handleDownloadReverseViewSvg}
+            style={{
+              marginBottom: "0.75rem",
+              padding: "0.4rem 0.8rem",
+              fontFamily: "inherit",
+              fontSize: "0.9rem",
+              cursor: "pointer",
+            }}
+          >
+            Download Reverse View SVG
+          </button>
         </div>
       )}
       <div
@@ -2312,25 +2432,21 @@ export default function PlateViz({
       </div>
       <div
         style={{
-          marginTop: 16,
+          marginTop: 4,
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
         }}
       >
         {(() => {
-          const topPad = 44;
-          const rightPad = 140;
-          const bottomPad = 68;
-          const leftPad = 52;
-          const plotHeight = Math.round(HEIGHT * 0.45);
-          const yPxPerAge =
-            plotHeight / (model.ages[model.ages.length - 1] - model.ages[0]);
-          const plotWidth = Math.round(
-            yPxPerAge * (model.years[model.years.length - 1] - model.years[0])
-          );
-          const topViewWidth = plotWidth + leftPad + rightPad;
-          const topViewHeight = plotHeight + topPad + bottomPad;
+          const {
+            topPad,
+            rightPad,
+            bottomPad,
+            leftPad,
+            topViewWidth,
+            topViewHeight,
+          } = buildTopViewLayout(model.years, model.ages);
           return (
             <>
               <TopView
@@ -2380,7 +2496,9 @@ export default function PlateViz({
                   alignItems: "center",
                 }}
               >
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowAges}
@@ -2388,7 +2506,9 @@ export default function PlateViz({
                   />
                   Age lines
                 </label>
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowYears}
@@ -2396,7 +2516,9 @@ export default function PlateViz({
                   />
                   Year lines
                 </label>
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowCohorts}
@@ -2404,7 +2526,9 @@ export default function PlateViz({
                   />
                   Cohort lines
                 </label>
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowContours}
@@ -2412,7 +2536,9 @@ export default function PlateViz({
                   />
                   Contour lines
                 </label>
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowIsotonic}
@@ -2420,7 +2546,9 @@ export default function PlateViz({
                   />
                   Isotonic lines
                 </label>
-                <label style={{ display: "inline-flex", gap: "0.4rem" }}>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
                   <input
                     type="checkbox"
                     checked={topShowContourCrossings}
@@ -2439,6 +2567,7 @@ export default function PlateViz({
         width={WIDTH}
         height={HEIGHT}
         svgStyle={vizStyle.svg}
+        svgRef={reverseViewSvgRef}
         offsetX={reverseOffsetX}
         offsetY={reverseOffsetY}
         layersEnabled={{
@@ -2475,6 +2604,7 @@ export default function PlateViz({
         cohortStyle={vizStyle.cohorts}
         valueStyle={linesVizStyle.values}
         isotonicStyle={isotonicStyle}
+        skipContourRun={reverseSkipContourRun}
         age0Wall={reverseAge0Wall}
         age0WallClipId={reverseAge0WallClipId}
         age0WallYearLines={reverseAge0WallYearLines}
@@ -2484,6 +2614,144 @@ export default function PlateViz({
         reverseLabelConfig={reverseLabelConfig}
         commonLabelProps={commonLabelProps}
       />
+      <div
+        style={{
+          marginTop: 16,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+        }}
+      >
+        {(() => {
+          const {
+            topPad,
+            rightPad,
+            bottomPad,
+            leftPad,
+            topViewWidth,
+            topViewHeight,
+          } = buildTopViewLayout(reverseModel.years, reverseModel.ages);
+          return (
+            <>
+              <TopView
+                width={topViewWidth}
+                height={topViewHeight}
+                years={reverseModel.years}
+                ages={reverseModel.ages}
+                rows={swedenRows}
+                contours={reverseTopViewContourRuns}
+                isotonicRows={isotonicRows}
+                isotonicStyle={{
+                  stroke: isotonicStyle.stroke,
+                  thinWidth: isotonicStyle.thinWidth,
+                  thickWidth: isotonicStyle.thickWidth,
+                  opacity: isotonicStyle.thickOpacity,
+                }}
+                padding={{
+                  top: topPad,
+                  right: rightPad,
+                  bottom: bottomPad,
+                  left: leftPad,
+                }}
+                showYears={reverseTopShowYears}
+                showAges={reverseTopShowAges}
+                showCohorts={reverseTopShowCohorts}
+                showContours={reverseTopShowContours}
+                showContourCrossings={reverseTopShowContourCrossings}
+                showIsotonic={reverseTopShowIsotonic}
+                contourMode={reverseTopContourMode}
+                reverseYears
+                reverseAges
+                lineStyle={{
+                  years: vizStyle.years,
+                  ages: vizStyle.ages,
+                  cohorts: vizStyle.cohorts,
+                  values: linesVizStyle.values,
+                }}
+                axisLabelStyle={AXIS_LABEL_STYLE}
+                showTitle
+              />
+              <div
+                style={{
+                  marginTop: 8,
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.75rem",
+                  fontSize: "0.85rem",
+                  alignItems: "center",
+                }}
+              >
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowAges}
+                    onChange={(e) => setReverseTopShowAges(e.target.checked)}
+                  />
+                  Age lines
+                </label>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowYears}
+                    onChange={(e) => setReverseTopShowYears(e.target.checked)}
+                  />
+                  Year lines
+                </label>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowCohorts}
+                    onChange={(e) => setReverseTopShowCohorts(e.target.checked)}
+                  />
+                  Cohort lines
+                </label>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowContours}
+                    onChange={(e) =>
+                      setReverseTopShowContours(e.target.checked)
+                    }
+                  />
+                  Contour lines
+                </label>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowIsotonic}
+                    onChange={(e) =>
+                      setReverseTopShowIsotonic(e.target.checked)
+                    }
+                  />
+                  Isotonic lines
+                </label>
+                <label
+                  style={{ display: "inline-flex", gap: "0.4rem", color: "#000" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={reverseTopShowContourCrossings}
+                    onChange={(e) =>
+                      setReverseTopShowContourCrossings(e.target.checked)
+                    }
+                  />
+                  Contour crossings
+                </label>
+              </div>
+            </>
+          );
+        })()}
+      </div>
     </div>
   );
 }

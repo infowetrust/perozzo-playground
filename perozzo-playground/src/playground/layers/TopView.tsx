@@ -41,6 +41,8 @@ type TopViewProps = {
   showIsotonic?: boolean;
   contourMode?: "raw" | "segmented";
   svgRef?: Ref<SVGSVGElement>;
+  reverseYears?: boolean;
+  reverseAges?: boolean;
   padding?: {
     top: number;
     right: number;
@@ -89,6 +91,8 @@ export default function TopView({
   showIsotonic = true,
   contourMode = "raw",
   svgRef,
+  reverseYears = false,
+  reverseAges = false,
   padding,
   lineStyle,
   axisLabelStyle,
@@ -128,10 +132,16 @@ export default function TopView({
 
   const plotHeight = height - pad.top - pad.bottom;
   const yPixelsPerAge = plotHeight / (ageMax - ageMin);
-  const scaleX = (year: number) =>
-    pad.left + (year - yearMin) * yPixelsPerAge;
-  const scaleY = (age: number) =>
-    pad.top + (age - ageMin) * yPixelsPerAge;
+  const scaleX = (year: number) => {
+    const t = (year - yearMin) / (yearMax - yearMin);
+    const dir = reverseYears ? 1 - t : t;
+    return pad.left + dir * (yearMax - yearMin) * yPixelsPerAge;
+  };
+  const scaleY = (age: number) => {
+    const t = (age - ageMin) / (ageMax - ageMin);
+    const dir = reverseAges ? 1 - t : t;
+    return pad.top + dir * (ageMax - ageMin) * yPixelsPerAge;
+  };
 
   const birthYearSet = new Set<number>();
   for (const row of rows) {

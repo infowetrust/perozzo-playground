@@ -1,3 +1,4 @@
+import type { Ref } from "react";
 import type { ProjectionOptions } from "../../../core/geometry";
 import type { Frame3D } from "../../../core/frame3d";
 import type { Point2D, Point3D } from "../../../core/types";
@@ -191,6 +192,7 @@ type ReverseViewProps = {
   width: number;
   height: number;
   svgStyle: { border: string; background: string };
+  svgRef?: Ref<SVGSVGElement>;
   offsetX: number;
   offsetY: number;
   layersEnabled: {
@@ -250,6 +252,7 @@ type ReverseViewProps = {
     thinOpacity: number;
     thickOpacity: number;
   };
+  skipContourRun?: (level: number, runId?: number) => boolean;
   age0Wall: string | null;
   age0WallClipId: string;
   age0WallYearLines: WallLine[];
@@ -264,6 +267,7 @@ export default function ReverseView({
   width,
   height,
   svgStyle,
+  svgRef,
   offsetX,
   offsetY,
   layersEnabled,
@@ -292,6 +296,7 @@ export default function ReverseView({
   cohortStyle,
   valueStyle,
   isotonicStyle,
+  skipContourRun,
   age0Wall,
   age0WallClipId,
   age0WallYearLines,
@@ -322,6 +327,7 @@ export default function ReverseView({
       <svg
         width={width}
         height={height}
+        ref={svgRef}
         style={{
           border: `1px solid ${svgStyle.border}`,
           background: svgStyle.background,
@@ -378,6 +384,7 @@ export default function ReverseView({
               cohortStyle={cohortStyle}
               isotonicSegByCell={model.isotonicSegByQuad}
               isotonicStyle={isotonicStyle}
+              skipContourRun={skipContourRun}
             />
           )}
           {age0Wall && (

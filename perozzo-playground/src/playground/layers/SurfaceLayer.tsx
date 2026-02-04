@@ -128,6 +128,7 @@ type SurfaceLayerProps = {
     thinOpacity: number;
     thickOpacity: number;
   };
+  skipContourRun?: (level: number, runId?: number) => boolean;
   hoverFocus?: { year: number; age: number; birthYear: number };
   hoverOpacity?: { highlightMult: number; dimMult: number };
 };
@@ -169,6 +170,7 @@ export default function SurfaceLayer({
   valueStyle,
   isotonicSegByCell,
   isotonicStyle,
+  skipContourRun = shouldSkipContourRun,
   globalTriSort = false,
   depthSortSign = 1,
   drawQuads = true,
@@ -695,7 +697,7 @@ export default function SurfaceLayer({
             const segItems = buildSegmentItemsForCell(cell.cellKey, segDepth);
             for (const seg of segItems) {
               if (seg.isContour) {
-                if (shouldSkipContourRun(seg.level ?? 0, seg.runId)) {
+                if (skipContourRun(seg.level ?? 0, seg.runId)) {
                   continue;
                 }
                 contourSegs.push(seg);
